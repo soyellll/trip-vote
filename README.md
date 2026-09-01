@@ -9,7 +9,7 @@
 
 - 정적 페이지 (GitHub Pages)
 - 실시간 동기화 + 저장 (Supabase)
-- AI 말투 변환 (Supabase Edge Function → Anthropic API)
+- AI 말투 변환 (Supabase Edge Function → Gemini API, 무료 티어)
 
 설정 전에도 그냥 열면 **한 기기에서 폰을 돌려가며 쓰는 모드**로 동작합니다 (AI 변환 제외).
 
@@ -42,25 +42,22 @@ window.TRIP_VOTE_CONFIG = {
 
 ### 1-4. Edge Function 배포
 
+Gemini API 키는 [Google AI Studio](https://aistudio.google.com/apikey) 에서 **Create API key** 로
+발급받습니다. 결제 수단 없이 무료 티어로 바로 씁니다.
+
 프로젝트 폴더에서 터미널을 열고 (전역 npm 설치는 Supabase 가 막아뒀으므로 `npx` 를 씁니다):
 
 ```bash
 npx supabase@latest login
 npx supabase@latest link --project-ref <프로젝트 ref>
-npx supabase@latest secrets set ANTHROPIC_API_KEY=sk-ant-...
+npx supabase@latest secrets set GEMINI_API_KEY=... ALLOWED_ORIGIN=https://soyellll.github.io
 npx supabase@latest functions deploy tone
 ```
 
 프로젝트 ref 는 대시보드 주소의 `/project/<ref>` 부분이고, 로그인 후
 `npx supabase@latest projects list` 로도 확인할 수 있습니다.
 
-배포 후 CORS 를 내 도메인으로 좁힙니다:
-
-```bash
-supabase secrets set ALLOWED_ORIGIN=https://soyellll.github.io
-```
-
-> **ANTHROPIC_API_KEY 는 이 secret 안에만 존재합니다.** `config.js` 에도, 프론트 코드 어디에도
+> **GEMINI_API_KEY 는 이 secret 안에만 존재합니다.** `config.js` 에도, 프론트 코드 어디에도
 > 넣지 마세요. 정적 사이트에 넣은 키는 개발자도구에서 그대로 보이고, 퍼블릭 레포면
 > 커밋 히스토리에서도 털립니다.
 
@@ -90,16 +87,28 @@ git add -A && git commit -m "설정" && git push
 | 신원 | 익명이라도 실제 Supabase 세션이 있어야 함. anon key 만으로는 통과 못 함 |
 | 방 코드 | 존재하는 방의 코드를 같이 보내야 함. 링크를 모르면 못 씀 |
 | 레이트 리밋 | 사용자당 시간당 40회 (`HOURLY_LIMIT`) |
-| 길이 상한 | 원문·변환문 모두 100자, `max_tokens` 400 |
+| 길이 상한 | 원문·변환문 모두 100자, `maxOutputTokens` 400 |
 
 CORS 도 `ALLOWED_ORIGIN` 으로 좁힐 수 있습니다 (기본 `*`).
 
-## 비용
+## 비용과 한도
 
-코멘트 1건 = 입력 약 300 토큰, 출력 약 100 토큰. Claude Opus 5 (입력 $5 / 출력 $25 per 1M) 기준
-**1회 약 $0.005**. 100번 변환해도 $0.5 수준입니다.
+`gemini-3.5-flash` 무료 티어라 **비용 $0** 입니다. 대신 상한이 있습니다.
 
-`output_config: { effort: "low" }` 로 두었습니다 — 짧은 문장 다듬기라 낮은 effort 로 충분합니다.
+- 무료 API 키: **분당 10회, 하루 250회** — 앱 전체(모든 사용자) 합산 기준입니다
+- 5명이 두 라운드 도는 한 번의 여행지 결정에 20회 안팎이라 넉넉합니다
+- 한도를 넘기면 429 가 오고, 화면에는 "AI 변환 한도에 걸렸어요" 가 뜨며
+  사용자는 "원문 그대로 쓰기" 로 넘어갈 수 있습니다 — 앱이 멈추지는 않습니다
+
+> **무료 티어는 입력·출력이 Google 제품 개선에 사용됩니다.** 유료(빌링 연결) 티어여야
+> 사용되지 않습니다. 코멘트 원문이 여기 해당하므로, 신경 쓰인다면 빌링을 연결하거나
+> Edge Function 배포를 건너뛰고 "기호·말버릇만 지우기" 폴백만 쓰세요.
+
+## 다른 모델로 바꾸려면
+
+`supabase/functions/tone/index.ts` 한 파일만 고치면 됩니다. 프론트는 `/functions/v1/tone` 에
+POST 하고 `{text}` 를 받을 뿐이라 뒤에 어떤 모델이 있는지 모릅니다. 스키마, RLS, 레이트 리밋,
+100자 상한, 익명성 설계는 전부 그대로입니다.
 
 ## 익명성을 위해 일부러 한 것들
 

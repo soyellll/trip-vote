@@ -1,15 +1,16 @@
 // 코멘트를 AI 말투로 바꾸는 프록시.
 //
-// ANTHROPIC_API_KEY 는 오직 여기에만 존재합니다. 브라우저는 이 함수만 부르고,
+// GEMINI_API_KEY 는 오직 여기에만 존재합니다. 브라우저는 이 함수만 부르고,
 // 키는 절대 클라이언트로 내려가지 않습니다.
 //
 // 배포:
-//   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
-//   supabase functions deploy tone
+//   npx supabase@latest secrets set GEMINI_API_KEY=...
+//   npx supabase@latest functions deploy tone
 
-import Anthropic from "npm:@anthropic-ai/sdk";
+import { GoogleGenAI } from "npm:@google/genai";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
+const MODEL = "gemini-3.5-flash";   // 무료 티어 사용 가능
 const MAX_CHARS = 100;      // 원문 상한
 const OUT_CHARS = 100;      // 변환문 상한
 const HOURLY_LIMIT = 40;    // 사용자당 시간당 변환 횟수
@@ -19,7 +20,7 @@ const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const ALLOWED_ORIGIN = Deno.env.get("ALLOWED_ORIGIN") ?? "*";
 
-const anthropic = new Anthropic({ apiKey: Deno.env.get("ANTHROPIC_API_KEY")! });
+const ai = new GoogleGenAI({ apiKey: Deno.env.get("GEMINI_API_KEY")! });
 
 const RULES = [
   "당신은 익명 투표에 달린 코멘트를 '누가 썼는지 알 수 없게' 다듬는 편집자입니다.",
@@ -66,7 +67,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
-  // 1) 신원 — 익명 로그인이라도 실제 세션이 있어야 합니다.
+  // 1) 신원 — 익명이라도 실제 Supabase 세션이 있어야 합니다.
   //    (anon key 자체도 유효한 JWT라서, 플랫폼의 verify_jwt 만으로는 아무나 부를 수 있습니다.)
   const authHeader = req.headers.get("Authorization") ?? "";
   const asUser = createClient(SUPABASE_URL, ANON_KEY, {
@@ -101,29 +102,22 @@ Deno.serve(async (req) => {
 
   // 5) 변환. 원문은 응답에도, 로그에도 남기지 않습니다.
   try {
-    const msg = await anthropic.messages.create({
-      model: "claude-opus-5",
-      max_tokens: 400,
-      output_config: { effort: "low" },   // 짧은 문장 다듬기라 낮은 effort로 충분합니다
-      system: RULES,
-      messages: [{ role: "user", content: `여행지: ${place}\n원문: ${text}` }],
+    const interaction = await ai.interactions.create({
+      model: MODEL,
+      input: `여행지: ${place}\n원문: ${text}`,
+      system_instruction: RULES,
+      generation_config: { temperature: 0.7, maxOutputTokens: 400 },
     });
 
-    if (msg.stop_reason === "refusal") return json({ error: "refused" }, 422);
-
-    const out = (msg.content as Array<{ type: string; text?: string }>)
-      .filter((b) => b.type === "text")
-      .map((b) => b.text ?? "")
-      .join("")
-      .trim();
-
-    const cleaned = clamp(strip(out), OUT_CHARS);
+    // 안전 필터에 걸리거나 텍스트가 없으면 output_text 가 비어서 옵니다.
+    const cleaned = clamp(strip(String(interaction.output_text ?? "")), OUT_CHARS);
     if (!cleaned) return json({ error: "empty_completion" }, 502);
 
     return json({ text: cleaned });
   } catch (e) {
     const status = (e as { status?: number })?.status;
     console.error("tone failed", status ?? "unknown");   // 원문은 찍지 않습니다
+    // 무료 티어는 분당 10회 / 하루 250회 상한이 있고, 둘 다 429 로 옵니다.
     if (status === 429) return json({ error: "upstream_rate_limited" }, 429);
     return json({ error: "upstream_failed" }, 502);
   }

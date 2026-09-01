@@ -321,7 +321,7 @@ var TONE_ERRORS = {
   empty: "내용을 먼저 적어 주세요.",
   no_room: "방을 확인할 수 없어요. 링크를 다시 열어 주세요.",
   rate_limited: "변환을 너무 많이 했어요. 한 시간 뒤에 다시 됩니다.",
-  upstream_rate_limited: "지금 요청이 몰렸어요. 잠시 뒤 다시 눌러 주세요.",
+  upstream_rate_limited: "AI 변환 한도에 걸렸어요. 잠시 뒤 다시 눌러 보고, 계속 안 되면 원문 그대로 제출하세요.",
   refused: "이 내용은 변환할 수 없어요. 다르게 적어 주세요.",
   empty_completion: "변환 결과가 비었어요. 다시 시도해 주세요.",
   upstream_failed: "변환에 실패했어요. 다시 시도해 주세요."
