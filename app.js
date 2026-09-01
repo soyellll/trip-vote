@@ -95,6 +95,13 @@ var newRoomYear = 2027;    // 새 방 만들 때 고른 연도
 var vacDays = "";          // 휴가 일수 입력 중인 값
 var delTarget = null;      // 삭제하려는 방
 var votersLoaded = false;  // 참가자 목록을 한 번이라도 받아왔는가
+var tagEditId = null;      // 태그 편집 중인 여행지
+var tagDraft = [];         // 편집 중인 태그 목록
+var tagText = "";          // 태그 입력창에 치고 있는 글자
+
+var TAG_SUGGEST = ["맛집", "가성비", "휴양", "물놀이", "쇼핑", "야경", "자연", "도시",
+  "부르주아", "뚜벅이", "인생샷", "가까움", "처음", "재방문"];
+var TAG_MAX = 8;
 var modalView = null;
 var toast = "";
 var spinSeen = {};
@@ -194,6 +201,16 @@ var store = {
       if (r.error) { say(writeError(r.error)); return; }
       await fetchPlaces();
     } else { S.places.push(Object.assign({ id: uid() }, d)); localSave(); schedule(); }
+  },
+  updatePlace: async function (id, patch) {
+    if (mode === "shared") {
+      var r = await sb.from("places").update(patch).eq("id", id);
+      if (r.error) { say(writeError(r.error)); return; }
+      await fetchPlaces();
+    } else {
+      S.places = S.places.map(function (p) { return p.id === id ? Object.assign({}, p, patch) : p; });
+      localSave(); schedule();
+    }
   },
   delPlace: async function (id) {
     if (mode === "shared") { await sb.from("places").delete().eq("id", id); await fetchPlaces(); }
@@ -473,7 +490,8 @@ async function addDestination(dest) {
   search = "";
   var f = document.querySelector('[data-keep="destsearch"]');
   if (f) f.value = "";
-  render();
+  var added = S.places.filter(function (p) { return p.name === dest.ko; })[0];
+  if (added) openTags(added.id); else render();
 }
 
 async function addCustomPlace() {
@@ -696,6 +714,73 @@ function passHTML(p, opts) {
     "</div></div>";
 }
 
+
+/* ============================================================
+   태그 — 여행지에 붙이는 공개 메모. 투표 때 다는 익명 코멘트와는 별개입니다.
+   ============================================================ */
+function placeTags(p) { return (p && Array.isArray(p.tags)) ? p.tags : []; }
+
+function normTag(t) {
+  return String(t || "").replace(/^#+/, "").replace(/[s,]+/g, "").slice(0, 12).trim();
+}
+
+function openTags(id) {
+  var p = placeById(id);
+  tagEditId = id;
+  tagDraft = placeTags(p).slice();
+  tagText = "";
+  render();
+}
+
+function addTagFromInput(raw) {
+  var t = normTag(raw == null ? tagText : raw);
+  if (!t) return false;
+  if (tagDraft.length >= TAG_MAX) { say("태그는 " + TAG_MAX + "개까지예요."); return false; }
+  if (tagDraft.indexOf(t) >= 0) { tagText = ""; return true; }
+  tagDraft.push(t);
+  tagText = "";
+  return true;
+}
+
+async function saveTags() {
+  if (!tagEditId) return;
+  var id = tagEditId, tags = tagDraft.slice();
+  var pending = normTag(tagText);
+  if (pending && tags.indexOf(pending) < 0 && tags.length < TAG_MAX) tags.push(pending);
+  tagEditId = null; tagDraft = []; tagText = "";
+  await store.updatePlace(id, { tags: tags });
+  render();
+}
+
+function tagEditorHTML(id) {
+  var chips = tagDraft.map(function (t, i) {
+    return '<span class="tag-chip on">#' + esc(t) +
+      '<button data-act="rmtag" data-i="' + i + '" aria-label="삭제">×</button></span>';
+  }).join("");
+  var used = {};
+  tagDraft.forEach(function (t) { used[t] = 1; });
+  var sug = TAG_SUGGEST.filter(function (t) { return !used[t]; }).slice(0, 8).map(function (t) {
+    return '<button class="tag-sug" data-act="sugtag" data-t="' + esc(t) + '">#' + esc(t) + "</button>";
+  }).join("");
+
+  return '<div class="tag-edit">' +
+    '<div class="eyebrow">태그 · ' + tagDraft.length + " / " + TAG_MAX + "</div>" +
+    (chips ? '<div class="tagrow">' + chips + "</div>" : '<p class="muted">아직 없어요.</p>') +
+    '<input class="field" data-keep="taginput" data-taginput="1" maxlength="13" ' +
+      'placeholder="태그 입력 후 엔터 (예: 맛집)" autocomplete="off" value="' + esc(tagText) + '">' +
+    (sug ? '<div class="tagrow">' + sug + "</div>" : "") +
+    '<div class="btn-row"><button class="btn sm red" data-act="savetags">저장</button>' +
+    '<button class="btn sm ghost" data-act="canceltags">취소</button></div></div>';
+}
+
+function tagsLine(p) {
+  var t = placeTags(p);
+  if (!t.length) return "";
+  return '<div class="tagrow">' + t.map(function (x) {
+    return '<span class="tag-chip">#' + esc(x) + "</span>";
+  }).join("") + "</div>";
+}
+
 /* ============================================================
    12. render
    ============================================================ */
@@ -908,8 +993,13 @@ function searchResultsHTML() {
 function viewLobby() {
   var withGeo = S.places.filter(function (p) { return p.lat != null; });
   var list = S.places.map(function (p) {
+    var editing = tagEditId === p.id;
     return '<div class="stack-sm">' + passHTML(p) +
-      '<div class="btn-row"><button class="btn sm ghost" data-act="delplace" data-id="' + p.id + '">삭제</button>' +
+      (editing ? tagEditorHTML(p.id) : tagsLine(p)) +
+      '<div class="btn-row">' +
+      (editing ? "" : '<button class="btn sm" data-act="opentags" data-id="' + p.id + '">' +
+        (placeTags(p).length ? "태그 고치기" : "+ 태그 달기") + "</button>") +
+      '<button class="btn sm ghost" data-act="delplace" data-id="' + p.id + '">삭제</button>' +
       (p.added_by ? '<span class="muted" style="align-self:center">' + esc(p.added_by) + " 추가</span>" : "") +
       "</div></div>";
   }).join("");
@@ -952,7 +1042,7 @@ function viewVote() {
     var picked = d.picks.indexOf(id) >= 0;
     return '<div class="pick-wrap"><button class="tapcard" data-act="pick" data-id="' + id + '">' +
       passHTML(p, { selected: picked, tick: true }) + "</button>" +
-      (picked ? composer(id) : "") + "</div>";
+      tagsLine(p) + (picked ? composer(id) : "") + "</div>";
   }).join("");
 
   return toastHTML() +
@@ -1312,6 +1402,12 @@ document.addEventListener("input", function (e) {
   var t = e.target;
   if (!t || !t.dataset) return;
   if (t.dataset.keep === "vacdays") { vacDays = t.value; return; }
+  if (t.dataset.taginput) {
+    // 스페이스나 쉼표로도 태그가 끊기게
+    if (/[s,]/.test(t.value)) { tagText = t.value; if (addTagFromInput()) render(); return; }
+    tagText = t.value;
+    return;
+  }
   if (t.dataset.search) {
     // 결과 목록만 바꿉니다. 전체 재렌더는 한글 조합을 끊고 입력값을 날립니다.
     search = t.value;
@@ -1341,6 +1437,7 @@ document.addEventListener("keydown", function (e) {
   var t = e.target;
   if (!t || !t.dataset) return;
   if (t.dataset.keep === "joinname" || t.dataset.keep === "roomtitle") { e.preventDefault(); t.blur(); }
+  if (t.dataset.taginput) { e.preventDefault(); if (addTagFromInput()) render(); }
 });
 
 document.addEventListener("click", function (e) {
@@ -1366,6 +1463,11 @@ document.addEventListener("click", function (e) {
     if (d) addDestination(d);
   }
   else if (act === "addcustom") addCustomPlace();
+  else if (act === "opentags") openTags(id);
+  else if (act === "savetags") saveTags();
+  else if (act === "canceltags") { tagEditId = null; tagDraft = []; tagText = ""; render(); }
+  else if (act === "rmtag") { tagDraft.splice(Number(el.dataset.i), 1); render(); }
+  else if (act === "sugtag") { addTagFromInput(el.dataset.t); render(); }
   else if (act === "delplace") store.delPlace(id);
   else if (act === "startvote") startVote();
   else if (act === "pick") togglePick(id);
