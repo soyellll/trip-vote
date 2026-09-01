@@ -34,6 +34,8 @@ var LS = {
 };
 
 var COMMENT_MAX = 100;
+var VOTES_R1 = 3;   // 1차 투표에서 한 명이 쓰는 표. 결선은 항상 1표
+var NUM_KO = { 1: "한", 2: "두", 3: "세", 4: "네", 5: "다섯" };
 var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 function makeCode() {
   var out = "";
@@ -108,7 +110,7 @@ var spinSeen = {};
 var wheelBusy = false;
 
 function M() { return S.meta || DEFAULT_META; }
-function votesFor(round) { return round === 1 ? 2 : 1; }
+function votesFor(round) { return round === 1 ? VOTES_R1 : 1; }
 function placeById(id) { for (var i = 0; i < S.places.length; i++) if (S.places[i].id === id) return S.places[i]; return null; }
 function placeName(id) { var p = placeById(id); return p ? p.name : "(삭제된 여행지)"; }
 function candidateIds() {
@@ -265,12 +267,29 @@ function writeError(err) {
 /* ============================================================
    4. 방 연결
    ============================================================ */
+var roomChannel = null;
 function subscribeRoom() {
+  if (roomChannel) { try { sb.removeChannel(roomChannel); } catch (e) {} }
   var ch = sb.channel("room:" + roomId);
+  roomChannel = ch;
   ch.on("postgres_changes", { event: "*", schema: "public", table: "rooms", filter: "id=eq." + roomId }, fetchRoom);
   ch.on("postgres_changes", { event: "*", schema: "public", table: "places", filter: "room_id=eq." + roomId }, fetchPlaces);
   ch.on("postgres_changes", { event: "*", schema: "public", table: "voters", filter: "room_id=eq." + roomId }, fetchVoters);
   ch.subscribe();
+}
+
+/* 헤더의 로고를 누르면 방에서 나와 여행 목록으로 돌아갑니다. */
+async function goHome() {
+  if (mode !== "shared") return;
+  if (draft && draft.picks.length && !modalView) { modalView = "home"; render(); return; }
+  if (roomChannel && sb) { try { sb.removeChannel(roomChannel); } catch (e) {} roomChannel = null; }
+  roomId = null; roomCode = null; votersLoaded = false;
+  S.meta = null; S.places = []; S.voters = []; S.ballots = [];
+  draft = null; dateSel = null; editingDates = false;
+  tagEditId = null; tagDraft = []; tagText = ""; search = ""; modalView = null;
+  location.hash = "";
+  await fetchRooms();
+  render();
 }
 
 async function attachRoom(code, id) {
@@ -815,7 +834,7 @@ var STEPS = [
   { k: "done", label: "05 확정" }
 ];
 function stepKey() {
-  if (needsRoom() || needsName() || editingDates) return "join";
+  if (needsRoom() || needsJoin() || editingDates) return "join";
   var m = M();
   if (m.phase === "lobby") return "lobby";
   if (m.phase === "done") return "done";
@@ -823,10 +842,15 @@ function stepKey() {
   return "final";
 }
 function needsRoom() { return mode === "shared" && !roomId; }
-function needsName() {
-  if (me.name && me.id) return false;
+/* 이름만으로는 부족합니다. 예전에 쓴 이름이 브라우저에 남아 있으면
+   날짜 화면을 건너뛰고 빈 날짜로 등록돼 버립니다. 날짜까지 있어야 참가 완료. */
+function needsJoin() {
   var p = M().phase;
-  return p === "lobby" || p === "vote";
+  if (p !== "lobby" && p !== "vote") return false;
+  if (!me.name || !me.id) return true;
+  if (mode === "shared" && !votersLoaded) return false;  // 아직 판단할 수 없음
+  var v = myVoter();
+  return !v || voterDates(v).length === 0;
 }
 
 function render() {
@@ -845,14 +869,14 @@ function render() {
     return '<li class="' + (i === cur ? "on" : (i < cur ? "past" : "")) + '">' + st.label + "</li>";
   }).join("");
 
-  ensureRegistered();
   if (wheelBusy && m.phase === "wheel") return;
 
   var html = "";
   if (mode === "connecting") html = viewConnecting();
   else if (needsRoom()) html = viewRoomEntry();
+  else if (mode === "shared" && !votersLoaded) html = viewConnecting();
   else if (editingDates) html = viewDates();
-  else if (needsName()) html = viewJoin();
+  else if (needsJoin()) html = viewJoin();
   else if (m.phase === "lobby") html = viewLobby();
   else if (m.phase === "vote") html = viewVote();
   else if (m.phase === "result") html = viewResult();
@@ -866,19 +890,11 @@ function render() {
   $("#modal").innerHTML = renderModal();
 
   restoreFocus();
-  if (m.phase === "wheel" && !needsRoom() && !needsName() && !editingDates) afterWheel();
+  if (m.phase === "wheel" && !needsRoom() && !needsJoin() && !editingDates) afterWheel();
 }
 
-var rejoinBusy = false;
-function ensureRegistered() {
-  if (mode === "connecting" || needsRoom() || !me.id || !me.name) return;
-  // 참가자 목록을 받아오기 전에 등록하면, 이미 있는 내 기록(날짜·투표 여부)을 빈 값으로 덮어씁니다.
-  if (mode === "shared" && !votersLoaded) return;
-  if (myVoter() || rejoinBusy) return;
-  rejoinBusy = true;
-  Promise.resolve(store.setVoter({ client_id: me.id, name: me.name, rounds: {}, dates: [] }))
-    .then(function () { rejoinBusy = false; }, function () { rejoinBusy = false; });
-}
+/* 예전에는 여기서 참가자를 자동 등록했지만, 날짜 없이 등록되는 통로였습니다.
+   이제 등록은 참가 화면(joinAsName)에서만 일어납니다. */
 
 function toastHTML() {
   return toast ? '<div class="notice"><span class="ic">!</span><span>' + esc(toast) + "</span></div>" : "";
@@ -938,7 +954,7 @@ function viewJoin() {
   if (!dateSel) startDatePick();
   return toastHTML() +
     '<div class="stack"><div><div class="eyebrow">Step 01 · Passenger</div>' +
-    '<h1 class="title">이름과<br>가능한 날짜</h1></div>' +
+    '<h1 class="title">' + (me.name ? "가능한 날짜를<br>골라 주세요" : "이름과<br>가능한 날짜") + "</h1></div>" +
     '<p class="lede">이름은 누가 참여했는지 표시하는 데만 써요. <b>표와 코멘트는 이름과 연결되지 않습니다.</b></p></div>' +
     '<input class="field" data-keep="joinname" maxlength="12" placeholder="이름 (예: 지수)" value="' + esc(me.name) + '" autocomplete="off">' +
     '<div class="stack-sm"><div class="eyebrow">2027년 · 가능한 날짜를 모두 고르세요</div>' +
@@ -1048,7 +1064,7 @@ function viewVote() {
   return toastHTML() +
     '<div class="stack"><div><div class="eyebrow">' +
     (m.round === 1 ? "Step 03 · 1차 투표" : "Step 04 · 결선 " + (m.round - 1) + "차") + "</div>" +
-    '<h1 class="title">' + (m.round === 1 ? "두 곳을 고르세요" : "한 곳만 고르세요") + "</h1></div>" +
+    '<h1 class="title">' + (m.round === 1 ? (NUM_KO[VOTES_R1] || VOTES_R1) + " 곳을 고르세요" : "한 곳만 고르세요") + "</h1></div>" +
     '<p class="lede">지금 <b>' + d.picks.length + " / " + max + "표</b> 썼어요. 고른 곳마다 이유를 남길 수 있고, 남긴 이유는 <b>번역기 말투로 바꾼 뒤에만</b> 제출돼요.</p></div>" +
     '<div class="stack" style="gap:16px">' + cards + "</div>" + progress;
 }
@@ -1305,11 +1321,11 @@ function renderDock() {
   if (editingDates) {
     inner = '<button class="btn red block" data-act="savedates"' + (dateSel && dateSel.size ? "" : " disabled") + ">날짜 저장</button>";
     hint = dateSel && dateSel.size ? dateSel.size + "일 선택함" : "최소 하루는 골라 주세요.";
-  } else if (needsName()) {
+  } else if (needsJoin()) {
     inner = '<button class="btn red block" data-act="join"' + (dateSel && dateSel.size ? "" : " disabled") + ">참가하기</button>";
     hint = dateSel && dateSel.size ? dateSel.size + "일 선택함" : "이름을 적고 가능한 날짜를 고르세요.";
   } else if (m.phase === "lobby") {
-    inner = '<button class="btn red block" data-act="startvote"' + (S.places.length < 2 ? " disabled" : "") + ">1차 투표 시작 · 한 명당 2표</button>";
+    inner = '<button class="btn red block" data-act="startvote"' + (S.places.length < 2 ? " disabled" : "") + ">1차 투표 시작 · 한 명당 " + VOTES_R1 + "표</button>";
     hint = S.places.length < 2 ? "여행지를 2곳 이상 올리면 시작할 수 있어요." : S.places.length + "곳 · 참가자 " + S.voters.length + "명";
   } else if (m.phase === "vote") {
     if (hasVoted(myVoter(), m.round)) {
@@ -1342,7 +1358,7 @@ function renderDock() {
 }
 
 function renderFoot() {
-  if (mode === "connecting" || needsRoom() || needsName() || editingDates) return "";
+  if (mode === "connecting" || needsRoom() || needsJoin() || editingDates) return "";
   var m = M(), bits = [];
   if (myVoter()) bits.push('<button data-act="editdates">내 날짜 수정</button>');
   if (m.phase !== "done") bits.push('<button data-act="askreset">처음부터 다시</button>');
@@ -1367,6 +1383,14 @@ function renderModal() {
       '<div class="btn-row" style="margin-top:4px">' +
       '<button class="btn red" style="flex:1" data-act="submit">제출하기</button>' +
       '<button class="btn ghost" data-act="closemodal">더 고칠래요</button></div></div></div></div>';
+  }
+  if (modalView === "home") {
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">나가기</div>' +
+      '<h1 class="title" style="font-size:24px">쓰던 투표를 버리고 나갈까요?</h1></div>' +
+      '<p class="lede">고른 곳과 쓰던 코멘트가 사라집니다. 이미 제출한 표는 그대로예요.</p>' +
+      '<div class="btn-row"><button class="btn" style="flex:1" data-act="leavehome">나가기</button>' +
+      '<button class="btn ghost" data-act="closemodal">계속 쓰기</button></div></div></div></div>';
   }
   if (modalView === "delroom") {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
@@ -1446,7 +1470,9 @@ document.addEventListener("click", function (e) {
   if (el.classList.contains("scrim") && e.target !== el) return;
   var act = el.dataset.act, id = el.dataset.id;
 
-  if (act === "createroom") {
+  if (act === "home") goHome();
+  else if (act === "leavehome") { draft = null; modalView = null; goHome(); }
+  else if (act === "createroom") {
     var tf = document.querySelector('[data-keep="roomtitle"]');
     createRoom(tf ? tf.value : "", newRoomYear);
   }
