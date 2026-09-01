@@ -100,6 +100,8 @@ var votersLoaded = false;  // 참가자 목록을 한 번이라도 받아왔는�
 var tagEditId = null;      // 태그 편집 중인 여행지
 var tagDraft = [];         // 편집 중인 태그 목록
 var tagText = "";          // 태그 입력창에 치고 있는 글자
+var identified = false;    // 이 방에서 '나는 누구인지' 확인을 마쳤는가
+var showHeat = false;      // 결과 화면의 달력 히트맵 펼침
 var titleEdit = false;     // 여행 이름 바꾸는 중
 var titleDraft = "";       // 바꾸는 중인 이름
 
@@ -289,6 +291,7 @@ async function goHome() {
   S.meta = null; S.places = []; S.voters = []; S.ballots = [];
   draft = null; dateSel = null; editingDates = false;
   tagEditId = null; tagDraft = []; tagText = ""; search = ""; modalView = null;
+  identified = false; showHeat = false; titleEdit = false;
   location.hash = "";
   await fetchRooms();
   render();
@@ -296,6 +299,7 @@ async function goHome() {
 
 async function attachRoom(code, id) {
   roomCode = code; roomId = id; votersLoaded = false;
+  identified = false; showHeat = false; titleEdit = false;
   sb = baseClient({ "x-room-code": code });
   await sb.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
   sb.realtime.setAuth(session.access_token);
@@ -464,6 +468,26 @@ function canSubmit() { return draft && draft.picks.length > 0 && draftBlocked().
    8. actions
    ============================================================ */
 function say(msg) { toast = msg; render(); setTimeout(function () { if (toast === msg) { toast = ""; render(); } }, 2800); }
+
+/* 명단에 있는 이름이면 그 사람으로 이어 갑니다. 없으면 새 참가자로 시작. */
+function identifyAs(name) {
+  name = String(name || "").trim().slice(0, 12);
+  if (!name) { say("이름을 적어 주세요."); return; }
+  var hit = null;
+  for (var i = 0; i < S.voters.length; i++) {
+    if (S.voters[i].name.replace(/\s/g, "") === name.replace(/\s/g, "")) { hit = S.voters[i]; break; }
+  }
+  if (hit) {
+    me.id = hit.client_id; me.name = hit.name;
+    LS.set("tv_cid", me.id); LS.set("tv_name", me.name);
+  } else {
+    me.id = uid(); me.name = name;
+    LS.set("tv_cid", me.id); LS.set("tv_name", me.name);
+    startDatePick();
+  }
+  identified = true;
+  render();
+}
 
 function startDatePick() {
   var v = myVoter();
@@ -899,16 +923,25 @@ function stepKey() {
   return "final";
 }
 function needsRoom() { return mode === "shared" && !roomId; }
-/* 이름만으로는 부족합니다. 예전에 쓴 이름이 브라우저에 남아 있으면
-   날짜 화면을 건너뛰고 빈 날짜로 등록돼 버립니다. 날짜까지 있어야 참가 완료. */
-function needsJoin() {
-  var p = M().phase;
-  if (p !== "lobby" && p !== "vote") return false;
-  if (!me.name || !me.id) return true;
-  if (mode === "shared" && !votersLoaded) return false;  // 아직 판단할 수 없음
+/* 방에 들어오면 먼저 "누구세요" 를 묻습니다.
+   이미 참가자 명단에 있는 이름이면 그 사람으로 이어서 보고 (다른 폰에서 들어와도 됨),
+   처음 보는 이름이면 날짜부터 고르는 전체 흐름으로 보냅니다. */
+function needsIdentify() {
+  if (mode === "shared" && !votersLoaded) return false;
+  if (needsRoom()) return false;
+  return !identified && !myVoter();
+}
+
+/* 날짜가 있어야 참가 완료입니다. 예전 이름이 브라우저에 남아 있다고
+   날짜 화면을 건너뛰면 빈 날짜로 등록돼 버립니다. */
+function needsDates() {
+  if (mode === "shared" && !votersLoaded) return false;
+  if (needsRoom() || needsIdentify()) return false;
   var v = myVoter();
   return !v || voterDates(v).length === 0;
 }
+
+function needsJoin() { return needsIdentify() || needsDates(); }
 
 function render() {
   if (drag && drag.active) return;   // 드래그 중엔 DOM을 갈아엎지 않습니다
@@ -936,7 +969,8 @@ function render() {
   else if (needsRoom()) html = viewRoomEntry();
   else if (mode === "shared" && !votersLoaded) html = viewConnecting();
   else if (editingDates) html = viewDates();
-  else if (needsJoin()) html = viewJoin();
+  else if (needsIdentify()) html = viewIdentify();
+  else if (needsDates()) html = viewJoin();
   else if (m.phase === "lobby") html = viewLobby();
   else if (m.phase === "vote") html = viewVote();
   else if (m.phase === "result") html = viewResult();
@@ -1026,6 +1060,27 @@ function viewRoomEntry() {
     '<button class="btn red block" data-act="createroom">이 여행 만들기</button></div>';
 }
 
+function viewIdentify() {
+  var known = S.voters.map(function (v) {
+    return '<button class="res" data-act="iam" data-n="' + esc(v.name) + '">' +
+      '<span class="nm">' + esc(v.name) + "</span>" +
+      '<span class="rg">' + voterDates(v).length + "일</span>" +
+      '<span class="hr">' + (hasVoted(v, M().round) ? "투표함" : "투표 전") + "</span></button>";
+  }).join("");
+
+  return toastHTML() +
+    '<div class="stack"><div><div class="eyebrow">' + esc(M().title || "여행") + "</div>" +
+    '<h1 class="title">누구세요?</h1></div>' +
+    '<p class="lede">이미 참여했다면 이름을 누르세요. 처음이면 아래에 이름을 적으면 됩니다.</p></div>' +
+    (S.voters.length
+      ? '<div class="stack-sm"><div class="eyebrow">참가자 ' + S.voters.length + "명</div>" +
+        '<div class="results" style="border-radius:6px;border-top:2px solid var(--ink)">' + known + "</div></div>"
+      : '<p class="muted" style="text-align:center;padding:6px 0">아직 참가자가 없어요.</p>') +
+    '<div class="panel stack-sm"><div class="eyebrow">처음이라면</div>' +
+    '<input class="field" data-keep="idname" maxlength="12" placeholder="이름 (예: 지수)" autocomplete="off" value="' + esc(me.name) + '">' +
+    '<button class="btn red block" data-act="identify">시작하기</button></div>';
+}
+
 function viewJoin() {
   if (!dateSel) startDatePick();
   return toastHTML() +
@@ -1058,6 +1113,22 @@ function allDoneShortcut() {
   if (votedCount(m.round) < S.voters.length) return "";
   return '<div class="panel stack-sm"><div class="eyebrow">' + S.voters.length + "명 모두 투표 완료</div>" +
     '<button class="btn red block" data-act="openresult">결과 열기</button></div>';
+}
+
+/* 결과·확정 화면에서도 여행지 정보를 보고 태그를 고칠 수 있게 합니다. */
+function placesPanel(ids) {
+  if (!ids.length) return "";
+  return '<div class="stack"><div class="eyebrow">여행지 정보</div>' +
+    ids.map(function (id) {
+      var p = placeById(id);
+      if (!p) return "";
+      var editing = tagEditId === id;
+      return '<div class="stack-sm">' + passHTML(p) +
+        (editing ? tagEditorHTML(id) : tagsLine(p)) +
+        (editing ? "" : '<div class="btn-row"><button class="btn sm ghost" data-act="opentags" data-id="' + id + '">' +
+          (placeTags(p).length ? "태그 고치기" : "+ 태그 달기") + "</button></div>") +
+        "</div>";
+    }).join("") + "</div>";
 }
 
 /* 검색 결과만 따로 그립니다.
@@ -1212,10 +1283,13 @@ function heatHTML() {
       rec.people + " / " + S.voters.length + "명 가능</p>" + vacLine + "</div>"
     : "";
 
-  return '<div class="stack"><div class="eyebrow">언제 갈까 · 숫자는 가능한 사람 수</div>' +
+  return '<div class="stack"><div class="eyebrow">언제 갈까</div>' +
     (best.max ? '<div class="stack-sm"><p class="lede"><b>' + best.max + "명</b>이 모두 가능한 날이 <b>" +
       best.dates.length + '일</b> 있어요.</p><div class="best"><b>' + esc(C.summarize(best.dates)) + "</b></div></div>" : "") +
-    recBlock + grids +
+    recBlock +
+    '<button class="btn block" data-act="toggleheat">' +
+      (showHeat ? "달력 접기 ▲" : "달력으로 보기 ▼") + "</button>" +
+    (showHeat ? '<p class="muted">숫자는 그날 가능한 사람 수예요.</p>' + grids : "") +
     '<div class="stack-sm"><div class="eyebrow">참가자별 휴가</div><div class="chips">' +
     S.voters.map(function (v) {
       return '<span class="chip">' + esc(v.name) + '<span class="mk">' +
@@ -1261,7 +1335,8 @@ function viewResult() {
     (m.round === 1 ? "1차 투표 결과" : "결선 " + (m.round - 1) + "차 결과") + " · " + o.ballots + "명 참여</div>" +
     head + "</div>" + note + "</div>" +
     '<div class="panel"><div class="stack-sm">' + rank + "</div></div>" +
-    finalChips + commentsPanel(m.round) + heatHTML();
+    finalChips + commentsPanel(m.round) + heatHTML() +
+    placesPanel(candidateIds()) + shareCard();
 }
 
 function commentsPanel(round) {
@@ -1384,7 +1459,7 @@ function viewDone() {
       '<p class="muted">' + rec.dates.length + "일 (평일 " + rec.weekdays + "일) · " +
       rec.people + " / " + S.voters.length + "명 가능" +
       (rec.limit == null ? "" : " · 휴가 평일 " + rec.limit + "일 한도") + "</p></div>" : "") +
-    allComments + heatHTML();
+    allComments + heatHTML() + placesPanel(candidateIds()) + shareCard();
 }
 
 /* ============================================================
@@ -1397,7 +1472,7 @@ function renderDock() {
   if (editingDates) {
     inner = '<button class="btn red block" data-act="savedates"' + (dateSel && dateSel.size ? "" : " disabled") + ">날짜 저장</button>";
     hint = dateSel && dateSel.size ? dateSel.size + "일 선택함" : "최소 하루는 골라 주세요.";
-  } else if (needsJoin()) {
+  } else if (needsDates()) {
     inner = '<button class="btn red block" data-act="join"' + (dateSel && dateSel.size ? "" : " disabled") + ">참가하기</button>";
     hint = dateSel && dateSel.size ? dateSel.size + "일 선택함" : "이름을 적고 가능한 날짜를 고르세요.";
   } else if (m.phase === "lobby") {
@@ -1559,6 +1634,7 @@ document.addEventListener("keydown", function (e) {
   var t = e.target;
   if (!t || !t.dataset) return;
   if (t.dataset.keep === "joinname" || t.dataset.keep === "roomtitle") { e.preventDefault(); t.blur(); }
+  if (t.dataset.keep === "idname") { e.preventDefault(); identifyAs(t.value); }
   if (t.dataset.titleinput) { titleDraft = t.value; return; }
   if (t.dataset.taginput) { e.preventDefault(); if (addTagFromInput()) render(); }
   if (t.dataset.titleinput) { e.preventDefault(); saveTitle(); }
@@ -1593,6 +1669,9 @@ document.addEventListener("click", function (e) {
     if (d) addDestination(d);
   }
   else if (act === "addcustom") addCustomPlace();
+  else if (act === "identify") { var nf = document.querySelector('[data-keep="idname"]'); identifyAs(nf ? nf.value : ""); }
+  else if (act === "iam") identifyAs(el.dataset.n);
+  else if (act === "toggleheat") { showHeat = !showHeat; render(); }
   else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; render(); }
   else if (act === "savetitle") saveTitle();
   else if (act === "canceltitle") { titleEdit = false; titleDraft = ""; render(); }
