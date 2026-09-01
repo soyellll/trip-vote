@@ -100,6 +100,8 @@ var votersLoaded = false;  // 참가자 목록을 한 번이라도 받아왔는�
 var tagEditId = null;      // 태그 편집 중인 여행지
 var tagDraft = [];         // 편집 중인 태그 목록
 var tagText = "";          // 태그 입력창에 치고 있는 글자
+var titleEdit = false;     // 여행 이름 바꾸는 중
+var titleDraft = "";       // 바꾸는 중인 이름
 
 var TAG_SUGGEST = ["맛집", "가성비", "휴양", "물놀이", "쇼핑", "야경", "자연", "도시",
   "부르주아", "뚜벅이", "인생샷", "가까움", "처음", "재방문"];
@@ -911,9 +913,25 @@ function modeBanner() {
 function shareCard() {
   if (mode !== "shared" || !roomId) return "";
   var m = M();
+  if (titleEdit) {
+    return '<div class="stack-sm"><div class="eyebrow">여행 이름 바꾸기</div>' +
+      '<input class="field" data-keep="titleinput" data-titleinput="1" maxlength="24" ' +
+        'placeholder="예: 27년도 여행" autocomplete="off" value="' + esc(titleDraft) + '">' +
+      '<div class="btn-row"><button class="btn sm red" data-act="savetitle">저장</button>' +
+      '<button class="btn sm ghost" data-act="canceltitle">취소</button></div></div>';
+  }
   return '<div class="stack-sm"><div class="eyebrow">' + (m.year || window.TV.cal.YEAR) + " 여행</div>" +
     '<div class="codebox">' + esc(m.title || "여행") + "</div>" +
-    '<button class="btn block" data-act="copylink">링크 복사해서 단톡방에 뿌리기</button></div>';
+    '<div class="btn-row"><button class="btn block" data-act="copylink">링크 복사해서 단톡방에 뿌리기</button></div>' +
+    '<button class="btn sm ghost" data-act="edittitle">이름 바꾸기</button></div>';
+}
+
+async function saveTitle() {
+  var t = String(titleDraft || "").trim().slice(0, 24);
+  if (!t) { say("이름을 적어 주세요."); return; }
+  titleEdit = false;
+  await store.setMeta({ title: t });
+  render();
 }
 
 function viewConnecting() {
@@ -1426,6 +1444,7 @@ document.addEventListener("input", function (e) {
   var t = e.target;
   if (!t || !t.dataset) return;
   if (t.dataset.keep === "vacdays") { vacDays = t.value; return; }
+  if (t.dataset.titleinput) { titleDraft = t.value; return; }
   if (t.dataset.taginput) {
     // 스페이스나 쉼표로도 태그가 끊기게
     if (/[s,]/.test(t.value)) { tagText = t.value; if (addTagFromInput()) render(); return; }
@@ -1461,7 +1480,9 @@ document.addEventListener("keydown", function (e) {
   var t = e.target;
   if (!t || !t.dataset) return;
   if (t.dataset.keep === "joinname" || t.dataset.keep === "roomtitle") { e.preventDefault(); t.blur(); }
+  if (t.dataset.titleinput) { titleDraft = t.value; return; }
   if (t.dataset.taginput) { e.preventDefault(); if (addTagFromInput()) render(); }
+  if (t.dataset.titleinput) { e.preventDefault(); saveTitle(); }
 });
 
 document.addEventListener("click", function (e) {
@@ -1489,6 +1510,9 @@ document.addEventListener("click", function (e) {
     if (d) addDestination(d);
   }
   else if (act === "addcustom") addCustomPlace();
+  else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; render(); }
+  else if (act === "savetitle") saveTitle();
+  else if (act === "canceltitle") { titleEdit = false; titleDraft = ""; render(); }
   else if (act === "opentags") openTags(id);
   else if (act === "savetags") saveTags();
   else if (act === "canceltags") { tagEditId = null; tagDraft = []; tagText = ""; render(); }
