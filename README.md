@@ -1,5 +1,7 @@
 # 여행지 소거전
 
+**https://soyellll.github.io/trip-vote/**
+
 친구들끼리 여행지를 정하는 모바일 웹앱. 가고 싶은 곳을 모으고 → 한 명당 2표로 익명 투표 →
 과반이 나오면 확정, 아니면 상위 3곳을 두고 재투표 또는 돌림판.
 
@@ -48,10 +50,10 @@ supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 supabase functions deploy tone
 ```
 
-배포 후 CORS 를 내 도메인으로 좁히려면:
+배포 후 CORS 를 내 도메인으로 좁힙니다:
 
 ```bash
-supabase secrets set ALLOWED_ORIGIN=https://<사용자명>.github.io
+supabase secrets set ALLOWED_ORIGIN=https://soyellll.github.io
 ```
 
 > **ANTHROPIC_API_KEY 는 이 secret 안에만 존재합니다.** `config.js` 에도, 프론트 코드 어디에도
@@ -60,8 +62,11 @@ supabase secrets set ALLOWED_ORIGIN=https://<사용자명>.github.io
 
 ## 2. GitHub Pages 배포
 
-레포에 올리고 **Settings → Pages → Source 를 "GitHub Actions"** 로 바꿉니다.
-`main` 에 push 하면 `.github/workflows/pages.yml` 이 자동 배포합니다.
+설정 완료 상태입니다. `main` 에 push 하면 `.github/workflows/pages.yml` 이 자동 배포합니다.
+
+```bash
+git add -A && git commit -m "설정" && git push
+```
 
 ## 3. 사용
 
