@@ -90,6 +90,11 @@ var draft = null;          // 투표 작성 중
 var dateSel = null;        // 날짜 고르는 중 (Set)
 var editingDates = false;  // 이미 참가한 사람이 날짜만 다시 고를 때
 var search = "";           // 여행지 검색어
+var roomList = [];         // 방 목록 (코드 없이 이름으로 고름)
+var newRoomYear = 2027;    // 새 방 만들 때 고른 연도
+var vacDays = "";          // 휴가 일수 입력 중인 값
+var delTarget = null;      // 삭제하려는 방
+var votersLoaded = false;  // 참가자 목록을 한 번이라도 받아왔는가
 var modalView = null;
 var toast = "";
 var spinSeen = {};
@@ -109,6 +114,32 @@ function myVoter() { for (var i = 0; i < S.voters.length; i++) if (S.voters[i].c
 function hasVoted(v, round) { return !!(v && v.rounds && v.rounds["r" + round]); }
 function votedCount(round) { var n = 0; S.voters.forEach(function (v) { if (hasVoted(v, round)) n++; }); return n; }
 function voterDates(v) { return (v && Array.isArray(v.dates)) ? v.dates : []; }
+function voterVac(v) { var n = v && v.vacation_days; return (typeof n === "number" && n > 0) ? n : null; }
+
+/** 참가자들이 적어 낸 휴가 일수 중 가장 빠듯한 값 = 그룹 한도 */
+function vacationLimit() {
+  var vals = S.voters.map(voterVac).filter(Boolean);
+  return vals.length ? Math.min.apply(null, vals) : null;
+}
+
+/** 가장 많이 겹치는 날짜 중, 휴가 한도에 들어가는 최장 연속 구간 */
+function recommendation() {
+  var best = bestDates();
+  if (!best.max) return null;
+  var C = window.TV.cal, limit = vacationLimit();
+  var cands = C.runs(best.dates).map(function (run) {
+    if (limit == null) return run;
+    var i = 0, keep = [];
+    for (var j = 0; j < run.length; j++) {
+      while (C.weekdays(run.slice(i, j + 1)) > limit) i++;
+      if (j - i + 1 > keep.length) keep = run.slice(i, j + 1);
+    }
+    return keep;
+  }).filter(function (r) { return r.length; });
+  if (!cands.length) return null;
+  cands.sort(function (a, b) { return b.length - a.length; });
+  return { dates: cands[0], people: best.max, limit: limit, weekdays: C.weekdays(cands[0]) };
+}
 
 /* ============================================================
    3. store
@@ -139,7 +170,10 @@ async function fetchPlaces() {
 }
 async function fetchVoters() {
   var r = await sb.from("voters").select("*").eq("room_id", roomId).order("joined_at", { ascending: true });
-  S.voters = r.data || []; schedule();
+  if (r.error) return;
+  S.voters = r.data || [];
+  votersLoaded = true;
+  schedule();
 }
 async function fetchBallots() {
   var r = await sb.from("ballots").select("*").eq("room_id", roomId).order("id", { ascending: true });
@@ -168,7 +202,7 @@ var store = {
   setVoter: async function (v) {
     if (mode === "shared") {
       var r = await sb.from("voters").upsert(
-        { room_id: roomId, client_id: v.client_id, name: v.name, rounds: v.rounds, dates: v.dates || [] },
+        { room_id: roomId, client_id: v.client_id, name: v.name, rounds: v.rounds, dates: v.dates || [], vacation_days: v.vacation_days == null ? null : v.vacation_days },
         { onConflict: "room_id,client_id" });
       if (r.error) { say(writeError(r.error)); return; }
       await fetchVoters();
@@ -223,7 +257,7 @@ function subscribeRoom() {
 }
 
 async function attachRoom(code, id) {
-  roomCode = code; roomId = id;
+  roomCode = code; roomId = id; votersLoaded = false;
   sb = baseClient({ "x-room-code": code });
   await sb.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
   sb.realtime.setAuth(session.access_token);
@@ -232,22 +266,45 @@ async function attachRoom(code, id) {
   subscribeRoom(); schedule();
 }
 
-async function createRoom() {
+/* 방 목록. code 는 RLS 게이트용으로만 남아 있고 화면에는 나오지 않습니다. */
+async function fetchRooms() {
+  if (mode !== "shared") return;
+  var r = await authClient.from("rooms").select("id,code,title,year,created_at")
+    .order("created_at", { ascending: false });
+  roomList = r.data || [];
+  schedule();
+}
+
+async function createRoom(title, year) {
+  title = String(title || "").trim().slice(0, 24);
+  year = Number(year) || newRoomYear;
+  if (!title) title = String(year).slice(2) + "년도 여행";
   var code = makeCode();
   var client = baseClient({ "x-room-code": code });
   await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
-  var r = await client.from("rooms").insert({ code: code }).select("id").single();
-  if (r.error) { say("방을 만들지 못했어요. 다시 눌러 주세요."); return; }
+  var r = await client.from("rooms").insert({ code: code, title: title, year: year }).select("id").single();
+  if (r.error) { say(writeError(r.error)); return; }
   await attachRoom(code, r.data.id);
+}
+
+async function deleteRoom() {
+  if (!delTarget) return;
+  var client = baseClient({ "x-room-code": delTarget.code });
+  await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
+  var r = await client.from("rooms").delete().eq("code", delTarget.code);
+  modalView = null; delTarget = null;
+  if (r.error) { say(writeError(r.error)); return; }
+  await fetchRooms();
+  render();
 }
 
 async function joinRoomByCode(code) {
   code = String(code || "").trim().toUpperCase();
-  if (code.length < 4) { say("코드를 정확히 입력해 주세요."); return; }
+  if (code.length < 4) return;
   var client = baseClient({ "x-room-code": code });
   await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
   var r = await client.from("rooms").select("id").eq("code", code).maybeSingle();
-  if (r.error || !r.data) { say("그런 방이 없어요. 코드를 다시 확인해 주세요."); return; }
+  if (r.error || !r.data) { say("그 방을 찾을 수 없어요."); return; }
   await attachRoom(code, r.data.id);
 }
 
@@ -258,6 +315,7 @@ async function initStore() {
     mode = "shared";
     var hash = (location.hash || "").replace(/^#\/?/, "").trim().toUpperCase();
     if (hash) await joinRoomByCode(hash);
+    if (!roomId) await fetchRooms();
   } catch (e) { mode = "local"; localLoad(); }
   schedule();
 }
@@ -369,7 +427,13 @@ function canSubmit() { return draft && draft.picks.length > 0 && draftBlocked().
    ============================================================ */
 function say(msg) { toast = msg; render(); setTimeout(function () { if (toast === msg) { toast = ""; render(); } }, 2800); }
 
-function startDatePick() { dateSel = new Set(voterDates(myVoter())); return dateSel; }
+function startDatePick() {
+  var v = myVoter();
+  dateSel = new Set(voterDates(v));
+  vacDays = voterVac(v) == null ? "" : String(voterVac(v));
+  return dateSel;
+}
+function vacNum() { var n = parseInt(vacDays, 10); return (n > 0 && n <= 60) ? n : null; }
 
 async function joinAsName(name) {
   name = String(name || "").trim().slice(0, 12);
@@ -380,7 +444,8 @@ async function joinAsName(name) {
   await store.setVoter({
     client_id: me.id, name: name,
     rounds: (v && v.rounds) || {},
-    dates: Array.from(dateSel).sort()
+    dates: Array.from(dateSel).sort(),
+    vacation_days: vacNum()
   });
   if (mode === "local" && !S.meta) await store.setMeta({});
   editingDates = false; dateSel = null;
@@ -391,7 +456,7 @@ async function saveDatesOnly() {
   var v = myVoter();
   if (!v) { editingDates = false; render(); return; }
   if (!dateSel || dateSel.size === 0) { say("최소 하루는 골라 주세요."); return; }
-  await store.setVoter({ client_id: me.id, name: v.name, rounds: v.rounds || {}, dates: Array.from(dateSel).sort() });
+  await store.setVoter({ client_id: me.id, name: v.name, rounds: v.rounds || {}, dates: Array.from(dateSel).sort(), vacation_days: vacNum() });
   editingDates = false; dateSel = null;
   render();
 }
@@ -450,7 +515,7 @@ async function submitBallot() {
   if (!ok) return;
   var v = myVoter() || { client_id: me.id, name: me.name, rounds: {}, dates: [] };
   var rounds = Object.assign({}, v.rounds || {}); rounds["r" + round] = true;
-  await store.setVoter({ client_id: me.id, name: v.name || me.name, rounds: rounds, dates: voterDates(v) });
+  await store.setVoter({ client_id: me.id, name: v.name || me.name, rounds: rounds, dates: voterDates(v), vacation_days: voterVac(v) });
   modalView = null; draft = null;
   if (mode === "local") modalView = "handoff";
   render();
@@ -494,7 +559,7 @@ function calHTML() {
   var head = C.WEEKDAYS.map(function (w, i) {
     return '<span class="' + (i === 0 || i === 6 ? "we" : "") + '">' + w + "</span>";
   }).join("");
-  var body = C.months().map(function (mo) {
+  var body = C.months(M().year || C.YEAR).map(function (mo) {
     var cells = "", i, j;
     for (i = 0; i < mo.lead; i++) cells += '<div class="cal-day pad"></div>';
     mo.days.forEach(function (d) {
@@ -722,6 +787,8 @@ function render() {
 var rejoinBusy = false;
 function ensureRegistered() {
   if (mode === "connecting" || needsRoom() || !me.id || !me.name) return;
+  // 참가자 목록을 받아오기 전에 등록하면, 이미 있는 내 기록(날짜·투표 여부)을 빈 값으로 덮어씁니다.
+  if (mode === "shared" && !votersLoaded) return;
   if (myVoter() || rejoinBusy) return;
   rejoinBusy = true;
   Promise.resolve(store.setVoter({ client_id: me.id, name: me.name, rounds: {}, dates: [] }))
@@ -741,9 +808,10 @@ function modeBanner() {
   return '<div class="banner"><span class="mk">실시간</span><span>같은 링크를 연 사람 모두에게 바로 반영돼요.</span></div>';
 }
 function shareCard() {
-  if (mode !== "shared" || !roomCode) return "";
-  return '<div class="stack-sm"><div class="eyebrow">방 코드</div>' +
-    '<div class="codebox">' + esc(roomCode) + "</div>" +
+  if (mode !== "shared" || !roomId) return "";
+  var m = M();
+  return '<div class="stack-sm"><div class="eyebrow">' + (m.year || window.TV.cal.YEAR) + " 여행</div>" +
+    '<div class="codebox">' + esc(m.title || "여행") + "</div>" +
     '<button class="btn block" data-act="copylink">링크 복사해서 단톡방에 뿌리기</button></div>';
 }
 
@@ -753,14 +821,32 @@ function viewConnecting() {
 }
 
 function viewRoomEntry() {
+  var list = roomList.map(function (r) {
+    return '<div class="res" style="padding:0">' +
+      '<button class="res" style="border:0;flex:1" data-act="enterroom" data-code="' + esc(r.code) + '">' +
+        '<span class="nm">' + esc(r.title || (r.year + "년도 여행")) + "</span>" +
+        '<span class="rg">' + r.year + "</span></button>" +
+      '<button class="btn sm ghost" style="margin-right:10px" data-act="askdelroom" data-code="' +
+        esc(r.code) + '" data-t="' + esc(r.title || "") + '">삭제</button></div>';
+  }).join("");
+
+  var years = [2026, 2027, 2028, 2029].map(function (y) {
+    return '<button class="btn sm' + (y === newRoomYear ? " red" : " ghost") + '" data-act="setyear" data-y="' + y + '">' + y + "</button>";
+  }).join("");
+
   return toastHTML() +
-    '<div class="stack"><div><div class="eyebrow">Start</div>' +
-    '<h1 class="title">방을 만들거나<br>코드로 들어오세요</h1></div>' +
-    '<p class="lede">방을 만들면 링크가 나옵니다. 그 링크를 단톡방에 뿌리면 친구들이 각자 폰에서 들어와요.</p></div>' +
-    '<button class="btn red block" data-act="createroom">새 방 만들기</button>' +
-    '<div class="panel soft stack-sm"><div class="eyebrow">이미 방이 있다면</div>' +
-    '<input class="field uppercase" data-keep="roomcode" maxlength="6" placeholder="코드 6자리" autocomplete="off" autocapitalize="characters">' +
-    '<button class="btn block" data-act="joinroom">코드로 들어가기</button></div>';
+    '<div class="stack"><div><div class="eyebrow">Start</div><h1 class="title">어느 여행이에요?</h1></div>' +
+    '<p class="lede">이미 만들어진 여행이 있으면 골라서 들어오고, 없으면 새로 만드세요.</p></div>' +
+    (roomList.length
+      ? '<div class="stack-sm"><div class="eyebrow">진행 중인 여행</div><div class="results" style="border-radius:6px;border-top:2px solid var(--ink)">' + list + "</div></div>"
+      : '<p class="muted" style="text-align:center;padding:6px 0">아직 만들어진 여행이 없어요.</p>') +
+    '<div class="panel stack-sm"><div class="eyebrow">새로 만들기</div>' +
+    '<div class="btn-row">' + years + "</div>" +
+    '<input class="field" data-keep="roomtitle" maxlength="24" placeholder="' +
+      String(newRoomYear).slice(2) + '년도 여행" autocomplete="off">' +
+    '<p class="muted">고른 연도의 캘린더가 들어갑니다. 이름을 비우면 “' +
+      String(newRoomYear).slice(2) + '년도 여행”으로 만들어져요.</p>' +
+    '<button class="btn red block" data-act="createroom">이 여행 만들기</button></div>';
 }
 
 function viewJoin() {
@@ -772,7 +858,10 @@ function viewJoin() {
     '<input class="field" data-keep="joinname" maxlength="12" placeholder="이름 (예: 지수)" value="' + esc(me.name) + '" autocomplete="off">' +
     '<div class="stack-sm"><div class="eyebrow">2027년 · 가능한 날짜를 모두 고르세요</div>' +
     '<p class="muted">탭하면 하루가 선택돼요. <b>꾹 눌렀다가 드래그</b>하면 여러 날을 한 번에 고를 수 있어요.</p>' +
-    calHTML() + "</div>" + allDoneShortcut() + modeBanner();
+    calHTML() + "</div>" + '<div class="panel stack-sm"><div class="eyebrow">휴가는 며칠까지</div>' +
+    '<p class="muted">주말 빼고 <b>평일 기준</b>으로 최대 며칠 쓸 수 있는지 적어 주세요. 비워도 됩니다.</p>' +
+    '<input class="field" data-keep="vacdays" type="number" inputmode="numeric" min="1" max="60" ' +
+    'placeholder="예: 7" value="' + esc(vacDays) + '"></div>' + allDoneShortcut() + modeBanner();
 }
 
 function viewDates() {
@@ -780,7 +869,10 @@ function viewDates() {
   return toastHTML() +
     '<div class="stack"><div><div class="eyebrow">내 날짜 수정</div><h1 class="title">가능한 날짜</h1></div>' +
     '<p class="lede">탭하면 하루, <b>꾹 눌렀다가 드래그</b>하면 여러 날을 한 번에 고를 수 있어요.</p></div>' +
-    calHTML();
+    calHTML() + '<div class="panel stack-sm"><div class="eyebrow">휴가는 며칠까지</div>' +
+    '<p class="muted">주말 빼고 <b>평일 기준</b>으로 최대 며칠 쓸 수 있는지 적어 주세요. 비워도 됩니다.</p>' +
+    '<input class="field" data-keep="vacdays" type="number" inputmode="numeric" min="1" max="60" ' +
+    'placeholder="예: 7" value="' + esc(vacDays) + '"></div>' + "";
 }
 
 function allDoneShortcut() {
@@ -789,6 +881,28 @@ function allDoneShortcut() {
   if (votedCount(m.round) < S.voters.length) return "";
   return '<div class="panel stack-sm"><div class="eyebrow">' + S.voters.length + "명 모두 투표 완료</div>" +
     '<button class="btn red block" data-act="openresult">결과 열기</button></div>';
+}
+
+/* 검색 결과만 따로 그립니다.
+   입력할 때마다 화면 전체를 다시 그리면 한글 조합(IME)이 깨지고 입력값이 날아갑니다. */
+function searchResultsHTML() {
+  var q = search.trim();
+  if (!q) return "";
+  var already = {};
+  S.places.forEach(function (p) { already[p.name] = 1; });
+  var hits = DEST.filter(function (d) {
+    return d.ko.indexOf(q) >= 0 || d.city.indexOf(q) >= 0 || d.r.indexOf(q) >= 0;
+  }).slice(0, 8);
+
+  return '<div class="results">' +
+    hits.map(function (d) {
+      return '<button class="res" data-act="adddest" data-c="' + d.c + '"' + (already[d.ko] ? " disabled" : "") + '>' +
+        '<span class="nm">' + esc(d.ko) + (already[d.ko] ? " (추가됨)" : "") + "</span>" +
+        '<span class="rg">' + esc(d.r) + "</span>" +
+        '<span class="hr">' + esc(window.TV.fmt.hours(d.h)) + "</span></button>";
+    }).join("") +
+    '<button class="res" data-act="addcustom"><span class="nm">“' + esc(q) + '” 직접 추가</span>' +
+    '<span class="rg">정보 없음</span></button></div>';
 }
 
 function viewLobby() {
@@ -800,29 +914,13 @@ function viewLobby() {
       "</div></div>";
   }).join("");
 
-  var q = search.trim();
-  var hits = q ? DEST.filter(function (d) {
-    return d.ko.indexOf(q) >= 0 || d.city.indexOf(q) >= 0 || d.r.indexOf(q) >= 0;
-  }).slice(0, 8) : [];
-  var already = {};
-  S.places.forEach(function (p) { already[p.name] = 1; });
-
-  var resultsHTML = q ? '<div class="results">' +
-    hits.map(function (d) {
-      return '<button class="res" data-act="adddest" data-c="' + d.c + '"' + (already[d.ko] ? " disabled" : "") + '>' +
-        '<span class="nm">' + esc(d.ko) + (already[d.ko] ? " (추가됨)" : "") + "</span>" +
-        '<span class="rg">' + esc(d.r) + "</span>" +
-        '<span class="hr">' + esc(window.TV.fmt.hours(d.h)) + "</span></button>";
-    }).join("") +
-    '<button class="res" data-act="addcustom"><span class="nm">“' + esc(q) + '” 직접 추가</span>' +
-    '<span class="rg">정보 없음</span></button></div>' : "";
-
   return toastHTML() +
     '<div class="stack"><div><div class="eyebrow">Step 02 · Destinations</div><h1 class="title">어디로 갈까</h1></div>' +
     '<p class="lede">나라나 도시를 검색해 추가하세요. 비행시간·항공권은 <b>인천 출발 기준 대략치</b>입니다.</p></div>' +
     shareCard() +
-    '<div><input class="field" data-keep="destsearch" data-search="1" maxlength="40" placeholder="나라·도시 검색 (예: 베트남, 다낭, 유럽)" autocomplete="off"' +
-    (q ? ' style="border-radius:4px 4px 0 0"' : "") + "></div>" + resultsHTML +
+    '<div><input class="field" data-keep="destsearch" data-search="1" maxlength="40" ' +
+    'placeholder="나라·도시 검색 (예: 베트남, 다낭, 유럽)" autocomplete="off" value="' + esc(search) + '">' +
+    '<div id="destresults">' + searchResultsHTML() + "</div></div>" +
     (withGeo.length ? mapHTML(withGeo) : "") +
     (S.places.length ? '<div class="stack">' + list + "</div>"
       : '<p class="muted" style="text-align:center;padding:14px 0">아직 올라온 곳이 없어요.</p>') +
@@ -920,11 +1018,27 @@ function heatHTML() {
       '<div class="heat-grid">' + cells + "</div></div>";
   }).join("");
 
-  var best = bestDates();
+  var best = bestDates(), rec = recommendation(), limit = vacationLimit();
+  var vacLine = limit == null
+    ? '<p class="muted">휴가 일수를 적은 사람이 없어서 기간은 안 맞춰 봤어요.</p>'
+    : '<p class="muted">휴가는 <b>평일 ' + limit + "일</b>까지 (가장 빠듯한 사람 기준)</p>";
+
+  var recBlock = rec
+    ? '<div class="panel stack-sm"><div class="eyebrow">추천 일정</div>' +
+      '<h2 class="sub">' + esc(C.summarize(rec.dates)) + "</h2>" +
+      '<p class="lede">' + rec.dates.length + "일 (평일 " + rec.weekdays + "일) · " +
+      rec.people + " / " + S.voters.length + "명 가능</p>" + vacLine + "</div>"
+    : "";
+
   return '<div class="stack"><div class="eyebrow">언제 갈까 · 숫자는 가능한 사람 수</div>' +
     (best.max ? '<div class="stack-sm"><p class="lede"><b>' + best.max + "명</b>이 모두 가능한 날이 <b>" +
       best.dates.length + '일</b> 있어요.</p><div class="best"><b>' + esc(C.summarize(best.dates)) + "</b></div></div>" : "") +
-    grids + "</div>";
+    recBlock + grids +
+    '<div class="stack-sm"><div class="eyebrow">참가자별 휴가</div><div class="chips">' +
+    S.voters.map(function (v) {
+      return '<span class="chip">' + esc(v.name) + '<span class="mk">' +
+        (voterVac(v) ? "평일 " + voterVac(v) + "일" : "미입력") + "</span></span>";
+    }).join("") + "</div></div></div>";
 }
 
 function viewResult() {
@@ -1003,7 +1117,8 @@ function viewChoose() {
     '<p class="muted" style="text-align:center">아무나 눌러도 돼요. 모두의 화면이 같이 넘어갑니다.</p>';
 }
 
-var SEG_FILL = ["#E1352A", "#1B3FD8", "#121211", "#8A3F3F", "#4E6B2F", "#63457A", "#0F7A6B", "#B36F16"];
+/* 모노톤 — 라벨이 전부 흰색이라 어두운 회색 계열만 씁니다 */
+var SEG_FILL = ["#141414", "#3A3A3A", "#242424", "#525252", "#1C1C1C", "#454545", "#2E2E2E", "#5C5C5C"];
 
 function viewWheel() {
   var m = M();
@@ -1067,7 +1182,7 @@ function afterWheel() {
 function viewDone() {
   var m = M(), p = placeById(m.winner);
   var how = m.tiebreak === "wheel" ? "돌림판으로 결정" : m.round > 1 ? "결선 투표로 결정" : "1차 투표 과반으로 결정";
-  var best = bestDates();
+  var rec = recommendation();
   var allComments = "", r;
   for (r = 1; r <= m.round; r++) {
     var block = commentsPanel(r);
@@ -1082,9 +1197,11 @@ function viewDone() {
     '<p class="muted">' + how + " · " + S.voters.length + "명 · " + m.round + "라운드</p></div>" +
     (p ? passHTML(p, { cls: " k" }) : "") +
     (p && p.lat != null ? mapHTML([p]) : "") +
-    (best.max ? '<div class="panel stack-sm"><div class="eyebrow">가장 많이 겹치는 날짜</div>' +
-      '<h2 class="sub">' + esc(window.TV.cal.summarize(best.dates)) + "</h2>" +
-      '<p class="muted">' + best.max + "명 / " + S.voters.length + "명 가능</p></div>" : "") +
+    (rec ? '<div class="panel stack-sm"><div class="eyebrow">추천 일정</div>' +
+      '<h2 class="sub">' + esc(window.TV.cal.summarize(rec.dates)) + "</h2>" +
+      '<p class="muted">' + rec.dates.length + "일 (평일 " + rec.weekdays + "일) · " +
+      rec.people + " / " + S.voters.length + "명 가능" +
+      (rec.limit == null ? "" : " · 휴가 평일 " + rec.limit + "일 한도") + "</p></div>" : "") +
     allComments + heatHTML();
 }
 
@@ -1161,6 +1278,14 @@ function renderModal() {
       '<button class="btn red" style="flex:1" data-act="submit">제출하기</button>' +
       '<button class="btn ghost" data-act="closemodal">더 고칠래요</button></div></div></div></div>';
   }
+  if (modalView === "delroom") {
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">여행 삭제</div>' +
+      '<h1 class="title" style="font-size:24px">“' + esc(delTarget.title || "이 여행") + '” 을 지울까요?</h1></div>' +
+      '<p class="lede">여행지, 표, 코멘트, 참가자 날짜가 전부 사라집니다. 되돌릴 수 없어요.</p>' +
+      '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--ink)" data-act="dodelroom">지우기</button>' +
+      '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
+  }
   if (modalView === "reset") {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">초기화</div>' +
@@ -1186,8 +1311,14 @@ function renderModal() {
 document.addEventListener("input", function (e) {
   var t = e.target;
   if (!t || !t.dataset) return;
-  if (t.dataset.keep === "roomcode") { t.value = t.value.toUpperCase(); return; }
-  if (t.dataset.search) { search = t.value; schedule(); return; }
+  if (t.dataset.keep === "vacdays") { vacDays = t.value; return; }
+  if (t.dataset.search) {
+    // 결과 목록만 바꿉니다. 전체 재렌더는 한글 조합을 끊고 입력값을 날립니다.
+    search = t.value;
+    var box = document.getElementById("destresults");
+    if (box) box.innerHTML = searchResultsHTML();
+    return;
+  }
   if (!t.dataset.raw) return;
 
   ensureDraft();
@@ -1209,8 +1340,7 @@ document.addEventListener("keydown", function (e) {
   if (e.key !== "Enter") return;
   var t = e.target;
   if (!t || !t.dataset) return;
-  if (t.dataset.keep === "roomcode") { e.preventDefault(); joinRoomByCode(t.value); }
-  if (t.dataset.keep === "joinname") { e.preventDefault(); t.blur(); }
+  if (t.dataset.keep === "joinname" || t.dataset.keep === "roomtitle") { e.preventDefault(); t.blur(); }
 });
 
 document.addEventListener("click", function (e) {
@@ -1219,8 +1349,14 @@ document.addEventListener("click", function (e) {
   if (el.classList.contains("scrim") && e.target !== el) return;
   var act = el.dataset.act, id = el.dataset.id;
 
-  if (act === "createroom") createRoom();
-  else if (act === "joinroom") { var f = document.querySelector('[data-keep="roomcode"]'); joinRoomByCode(f ? f.value : ""); }
+  if (act === "createroom") {
+    var tf = document.querySelector('[data-keep="roomtitle"]');
+    createRoom(tf ? tf.value : "", newRoomYear);
+  }
+  else if (act === "setyear") { newRoomYear = Number(el.dataset.y); render(); }
+  else if (act === "enterroom") joinRoomByCode(el.dataset.code);
+  else if (act === "askdelroom") { delTarget = { code: el.dataset.code, title: el.dataset.t }; modalView = "delroom"; render(); }
+  else if (act === "dodelroom") deleteRoom();
   else if (act === "copylink") copyLink();
   else if (act === "join") { var j = document.querySelector('[data-keep="joinname"]'); joinAsName(j ? j.value : ""); }
   else if (act === "editdates") { editingDates = true; startDatePick(); render(); }

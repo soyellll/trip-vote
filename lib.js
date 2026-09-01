@@ -126,13 +126,32 @@ function daysInMonth(y, m) { return new Date(y, m, 0).getDate(); }
 function firstWeekday(y, m) { return new Date(y, m - 1, 1).getDay(); }
 
 /** 2027년 12개월치 구조. 각 달은 { m, label, lead, days:[iso...] } */
-function months() {
-  var out = [];
+function months(year) {
+  var y = year || YEAR, out = [];
   for (var m = 1; m <= 12; m++) {
-    var n = daysInMonth(YEAR, m), days = [];
-    for (var d = 1; d <= n; d++) days.push(iso(YEAR, m, d));
-    out.push({ m: m, label: YEAR + "." + (m < 10 ? "0" : "") + m, lead: firstWeekday(YEAR, m), days: days });
+    var n = daysInMonth(y, m), days = [];
+    for (var d = 1; d <= n; d++) days.push(iso(y, m, d));
+    out.push({ m: m, label: y + "." + (m < 10 ? "0" : "") + m, lead: firstWeekday(y, m), days: days });
   }
+  return out;
+}
+
+/** 주말을 뺀 평일 수 */
+function weekdays(list) {
+  return list.filter(function (d) {
+    var w = new Date(d + "T00:00:00").getDay();
+    return w !== 0 && w !== 6;
+  }).length;
+}
+
+/** 정렬된 날짜 배열을 연속 구간들로 자릅니다 */
+function runs(sorted) {
+  var out = [], cur = [];
+  sorted.forEach(function (d, i) {
+    if (i && range(sorted[i - 1], d).length !== 2) { out.push(cur); cur = []; }
+    cur.push(d);
+  });
+  if (cur.length) out.push(cur);
   return out;
 }
 
@@ -244,7 +263,7 @@ function won(p) { return p[0] + "~" + p[1] + "만원"; }
 
 return {
   tone: { translatorize: translatorize },
-  cal: { YEAR: YEAR, WEEKDAYS: WEEKDAYS, months: months, range: range, pretty: pretty, summarize: summarize, iso: iso },
+  cal: { YEAR: YEAR, WEEKDAYS: WEEKDAYS, months: months, range: range, pretty: pretty, summarize: summarize, iso: iso, weekdays: weekdays, runs: runs },
   map: { W: MAP_W, H: MAP_H, px: px, py: py, countryPaths: countryPaths, arc: arc },
   fmt: { hours: hours, won: won }
 };
