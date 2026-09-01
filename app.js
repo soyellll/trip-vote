@@ -87,6 +87,16 @@ var roomId = null, roomCode = null;
 
 var me = { id: LS.get("tv_cid") || "", name: LS.get("tv_name") || "" };
 function ensureCid() { if (!me.id) { me.id = uid(); LS.set("tv_cid", me.id); } return me.id; }
+function roomKey() { return "tv_who_" + (roomCode || "local"); }
+
+/** 받침에 맞춘 조사. 받침이 없거나 ㄹ 이면 '로', 그 외에는 '으로'. */
+function ro(name) {
+  var last = String(name || "").trim().slice(-1);
+  var code = last.charCodeAt(0);
+  if (!(code >= 0xAC00 && code <= 0xD7A3)) return "로";
+  var jong = (code - 0xAC00) % 28;
+  return (jong === 0 || jong === 8) ? "로" : "으로";
+}
 
 var draft = null;          // 투표 작성 중
 var dateSel = null;        // 날짜 고르는 중 (Set)
@@ -299,7 +309,8 @@ async function goHome() {
 
 async function attachRoom(code, id) {
   roomCode = code; roomId = id; votersLoaded = false;
-  identified = false; showHeat = false; titleEdit = false;
+  identified = !!(me.id && LS.get("tv_who_" + code) === me.id);
+  showHeat = false; titleEdit = false;
   sb = baseClient({ "x-room-code": code });
   await sb.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
   sb.realtime.setAuth(session.access_token);
@@ -486,6 +497,7 @@ function identifyAs(name) {
     startDatePick();
   }
   identified = true;
+  LS.set(roomKey(), me.id);
   render();
 }
 
@@ -654,6 +666,13 @@ async function doSpin() {
   var seg = 360 / cands.length;
   var deg = 360 * 7 - (idx + 0.5) * seg + (Math.random() - 0.5) * seg * 0.6;
   await store.setMeta({ spin: { id: uid(), deg: deg, idx: idx, order: cands }, winner: cands[idx] });
+}
+
+function switchPerson() {
+  LS.del(roomKey());
+  identified = false;
+  draft = null; dateSel = null; editingDates = false; modalView = null;
+  render();
 }
 
 function nextPerson() {
@@ -929,7 +948,7 @@ function needsRoom() { return mode === "shared" && !roomId; }
 function needsIdentify() {
   if (mode === "shared" && !votersLoaded) return false;
   if (needsRoom()) return false;
-  return !identified && !myVoter();
+  return !identified;
 }
 
 /* 날짜가 있어야 참가 완료입니다. 예전 이름이 브라우저에 남아 있다고
@@ -1078,7 +1097,7 @@ function viewIdentify() {
       : '<p class="muted" style="text-align:center;padding:6px 0">아직 참가자가 없어요.</p>') +
     '<div class="panel stack-sm"><div class="eyebrow">처음이라면</div>' +
     '<input class="field" data-keep="idname" maxlength="12" placeholder="이름 (예: 지수)" autocomplete="off" value="' + esc(me.name) + '">' +
-    '<button class="btn red block" data-act="identify">시작하기</button></div>';
+    '<button class="btn red block" data-act="identify">' + (me.name ? esc(me.name) + ro(me.name) + " 시작하기" : "시작하기") + "</button></div>";
 }
 
 function viewJoin() {
@@ -1512,6 +1531,7 @@ function renderFoot() {
   if (mode === "connecting" || needsRoom() || needsJoin() || editingDates) return "";
   var m = M(), bits = [];
   if (myVoter()) bits.push('<button data-act="editdates">내 날짜 수정</button>');
+  bits.push('<button data-act="switchperson">다른 사람으로</button>');
   if (m.phase !== "done") bits.push('<button data-act="askreset">처음부터 다시</button>');
   if (mode === "local" && m.phase === "vote") bits.push('<button data-act="next">다음 사람에게 넘기기</button>');
   if (mode === "shared" && m.phase !== "lobby") bits.push('<button data-act="copylink">링크 복사</button>');
@@ -1671,6 +1691,7 @@ document.addEventListener("click", function (e) {
   else if (act === "addcustom") addCustomPlace();
   else if (act === "identify") { var nf = document.querySelector('[data-keep="idname"]'); identifyAs(nf ? nf.value : ""); }
   else if (act === "iam") identifyAs(el.dataset.n);
+  else if (act === "switchperson") switchPerson();
   else if (act === "toggleheat") { showHeat = !showHeat; render(); }
   else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; render(); }
   else if (act === "savetitle") saveTitle();
