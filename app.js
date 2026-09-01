@@ -1535,6 +1535,10 @@ function viewResult() {
     (m.round === 1 ? "1차 투표 결과" : "결선 " + (m.round - 1) + "차 결과") + " · " + o.ballots + "명 참여</div>" +
     head + "</div>" + note + "</div>" +
     '<div class="panel"><div class="stack-sm">' + rank + "</div></div>" +
+    (myBallot(m.round)
+      ? '<div class="stack-sm"><button class="btn block" data-act="askedit">내 표 고치기</button>' +
+        '<p class="muted">고른 곳과 코멘트를 바꿀 수 있어요. 바꾸면 순위도 다시 계산됩니다.</p></div>'
+      : "") +
     finalChips + commentsPanel(m.round) + heatHTML() +
     placesPanel(candidateIds()) + shareCard();
 }
