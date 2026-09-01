@@ -28,6 +28,13 @@ jobs:
           mkdir -p _site
           cp index.html app.js lib.js config.js _site/
           cp -r data _site/data
+          # GitHub Pages 는 max-age=600 으로 내려줍니다. 커밋 해시를 쿼리로 붙여
+          # 배포 직후에도 브라우저가 옛 스크립트를 재사용하지 않게 합니다.
+          V="${GITHUB_SHA::8}"
+          sed -i -E "s#(src=\"(app|lib|config)\.js)\"#\1?v=$V\"#g" _site/index.html
+          sed -i -E "s#(src=\"data/[a-z]+\.js)\"#\1?v=$V\"#g" _site/index.html
+          echo "--- 결과 ---"
+          grep -o 'src="[^"]*"' _site/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
