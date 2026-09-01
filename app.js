@@ -1081,6 +1081,15 @@ function stepBanner() {
     '<button class="btn sm" data-act="golive">현재 단계로</button></div>';
 }
 
+/* 결과를 열어도 아직 투표 안 한 사람은 계속 투표할 수 있습니다.
+   나중에 들어온 사람도 마찬가지고, 표가 들어오면 결과가 같이 바뀝니다. */
+function canStillVote() {
+  var m = M();
+  if (m.phase !== "result") return false;
+  var v = myVoter();
+  return !!v && !hasVoted(v, m.round);
+}
+
 function needsIdentify() {
   if (mode === "shared" && !votersLoaded) return false;
   if (needsRoom()) return false;
@@ -1140,7 +1149,7 @@ function render() {
   }
   else if (m.phase === "lobby") html = viewLobby();
   else if (m.phase === "vote") html = viewVote();
-  else if (m.phase === "result") html = viewResult();
+  else if (m.phase === "result") html = canStillVote() ? viewVote() : viewResult();
   else if (m.phase === "choose") html = viewChoose();
   else if (m.phase === "wheel") html = viewWheel();
   else if (m.phase === "done") html = viewDone();
@@ -1382,6 +1391,9 @@ function viewVote() {
   }).join("");
 
   return toastHTML() +
+    (m.phase === "result"
+      ? '<div class="banner"><span class="mk">늦참 환영</span><span>결과가 이미 열렸지만 <b>아직 투표할 수 있어요.</b> 내 표가 들어가면 결과도 같이 바뀝니다.</span></div>'
+      : "") +
     '<div class="stack"><div><div class="eyebrow">' +
     (m.round === 1 ? "Step 03 · 1차 투표" : "Step 04 · 결선 " + (m.round - 1) + "차") + "</div>" +
     '<h1 class="title">' + (m.round === 1 ? (NUM_KO[VOTES_R1] || VOTES_R1) + " 곳을 고르세요" : "한 곳만 고르세요") + "</h1></div>" +
@@ -1686,6 +1698,12 @@ function renderDock() {
         : blocked.length ? "코멘트를 쓴 곳은 " + COMMENT_MAX + "자 이내로 줄이고 말투 변환까지 마쳐야 해요."
         : draft.picks.length + "곳 선택함";
     }
+  } else if (canStillVote()) {
+    var blocked2 = draft ? draftBlocked() : [];
+    inner = '<button class="btn red block" data-act="review"' + (canSubmit() ? "" : " disabled") + ">확인하고 투표하기</button>";
+    hint = !draft || draft.picks.length === 0 ? "최소 한 곳은 골라 주세요."
+      : blocked2.length ? "코멘트를 쓴 곳은 " + COMMENT_MAX + "자 이내로 줄이고 말투 변환까지 마쳐야 해요."
+      : draft.picks.length + "곳 선택함";
   } else if (m.phase === "result") {
     var o = outcome(m.round);
     if (o.kind === "win") inner = '<button class="btn red block" data-act="confirmwin" data-id="' + o.winner + '">여기로 확정하기</button>';
@@ -1746,8 +1764,8 @@ function renderModal() {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">결과 열기</div>' +
       '<h1 class="title" style="font-size:24px">아직 ' + leftN + '명이 투표 전이에요</h1></div>' +
-      '<p class="lede">지금 열면 <b>그 사람들은 이번 라운드에 투표할 수 없습니다.</b> 새로 들어오는 사람도 마찬가지예요. ' +
-      '열고 나서도 헤더의 <b>←</b> 로 다시 투표를 열 수 있습니다.</p>' +
+      '<p class="lede">열어도 <b>그 사람들과 새로 들어오는 사람은 계속 투표할 수 있어요.</b> ' +
+      '표가 들어오면 결과도 같이 바뀝니다. 지금 나온 순위만 미리 보는 셈이에요.</p>' +
       '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doopenresult">그래도 열기</button>' +
       '<button class="btn ghost" data-act="closemodal">기다리기</button></div></div></div></div>';
   }
@@ -1756,10 +1774,10 @@ function renderModal() {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">1차 투표</div>' +
       '<h1 class="title" style="font-size:24px">이미 낸 표가 ' + n1 + '장 있어요</h1></div>' +
-      '<p class="lede"><b>이어서 하기</b> — 낸 표는 그대로 두고 아직 안 한 사람만 투표합니다. ' +
+      '<p class="lede"><b>표 수정하기</b> — 낸 표는 그대로 두고 아직 안 한 사람만 투표합니다. ' +
       '이미 낸 사람은 각자 "내 표 고치기" 로 자기 표만 바꿀 수 있어요.<br><br>' +
       '<b>모두 다시</b> — 참가자 전원의 이번 라운드 표와 코멘트를 지우고 처음부터 다시 합니다.</p>' +
-      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="startvotekeep">이어서 하기</button>' +
+      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="startvotekeep">표 수정하기</button>' +
       '<button class="btn" data-act="startvotefresh">모두 다시</button></div>' +
       '<button class="btn ghost block" data-act="closemodal">그만두기</button></div></div></div>';
   }
