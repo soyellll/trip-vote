@@ -88,6 +88,15 @@ var roomId = null, roomCode = null;
 var me = { id: LS.get("tv_cid") || "", name: LS.get("tv_name") || "" };
 function ensureCid() { if (!me.id) { me.id = uid(); LS.set("tv_cid", me.id); } return me.id; }
 function roomKey() { return "tv_who_" + (roomCode || "local"); }
+/* 내가 낸 표. 서버에 client_id 로 기록돼 있어 어느 기기에서든 찾을 수 있습니다.
+   화면에는 여전히 이름 없이 보여 주지만, 서버는 알고 있습니다. */
+function myBallot(round) {
+  for (var i = 0; i < S.ballots.length; i++) {
+    var b = S.ballots[i];
+    if (b.round === round && b.client_id && b.client_id === me.id) return b;
+  }
+  return null;
+}
 
 /** 받침에 맞춘 조사. 받침이 없거나 ㄹ 이면 '로', 그 외에는 '으로'. */
 function ro(name) {
@@ -196,10 +205,7 @@ function localSave() {
 
 async function fetchRoom() {
   var r = await sb.from("rooms").select("*").eq("id", roomId).maybeSingle();
-  if (r.data) {
-    S.meta = r.data;
-    if (r.data.phase === "result" || r.data.phase === "done") await fetchBallots();
-  }
+  if (r.data) { S.meta = r.data; await fetchBallots(); }
   schedule();
 }
 async function fetchPlaces() {
@@ -267,11 +273,23 @@ var store = {
   },
   addBallot: async function (b) {
     if (mode === "shared") {
-      var r = await sb.from("ballots").insert({ room_id: roomId, round: b.round, entries: b.entries });
-      if (r.error) { say(writeError(r.error)); return false; }
-      return true;
+      var r = await sb.from("ballots")
+        .insert({ room_id: roomId, round: b.round, entries: b.entries, client_id: me.id })
+        .select("id").single();
+      if (r.error) { say(writeError(r.error)); return null; }
+      await fetchBallots();
+      return r.data.id;
     }
-    S.ballots.push(Object.assign({ id: uid() }, b)); localSave(); schedule(); return true;
+    var id = uid();
+    S.ballots.push(Object.assign({ id: id, client_id: me.id }, b)); localSave(); schedule(); return id;
+  },
+  delBallot: async function (id) {
+    if (mode === "shared") {
+      await sb.from("ballots").delete().eq("id", id).eq("client_id", me.id);
+      await fetchBallots();
+    } else {
+      S.ballots = S.ballots.filter(function (b) { return b.id !== id; }); localSave();
+    }
   },
   resetAll: async function () {
     if (mode === "shared") {
@@ -620,8 +638,8 @@ async function submitBallot() {
   if (!canSubmit()) return;
   var round = draft.round;
   var entries = draft.picks.map(function (id) { return { place: id, comment: commentFor(id).slice(0, COMMENT_MAX) }; });
-  var ok = await store.addBallot({ round: round, entries: shuffle(entries) });
-  if (!ok) return;
+  var newId = await store.addBallot({ round: round, entries: shuffle(entries) });
+  if (!newId) return;
   var v = myVoter() || { client_id: me.id, name: me.name, rounds: {}, dates: [] };
   var rounds = Object.assign({}, v.rounds || {}); rounds["r" + round] = true;
   await store.setVoter({ client_id: me.id, name: v.name || me.name, rounds: rounds, dates: voterDates(v), vacation_days: voterVac(v) });
@@ -673,6 +691,37 @@ async function clearRound(round) {
     await store.setVoter({ client_id: v.client_id, name: v.name, rounds: rounds, dates: voterDates(v), vacation_days: voterVac(v) });
   }
   if (mode === "shared") await fetchBallots(); else localSave();
+}
+
+/* 낸 표를 회수해 고치기. 내 표 하나만 지우고 이전 선택을 초안으로 되살립니다.
+   다른 사람 표는 건드리지 않습니다. */
+async function editMyBallot() {
+  var round = M().round;
+  var b = myBallot(round);
+  if (!b) { say("낸 표를 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요."); return; }
+  var entries = (b.entries || []).slice();
+
+  await store.delBallot(b.id);
+  var v = myVoter();
+  if (v) {
+    var rounds = Object.assign({}, v.rounds || {});
+    delete rounds["r" + round];
+    await store.setVoter({ client_id: me.id, name: v.name, rounds: rounds,
+      dates: voterDates(v), vacation_days: voterVac(v) });
+  }
+  resetDraft(round);
+  entries.forEach(function (e) {
+    if (!placeById(e.place)) return;
+    draft.picks.push(e.place);
+    if (e.comment) {
+      draft.raw[e.place] = e.comment;
+      draft.ai[e.place] = e.comment;
+      draft.status[e.place] = "ready";
+    }
+  });
+  modalView = null;
+  say("표를 되돌렸어요. 고쳐서 다시 제출해 주세요.");
+  render();
 }
 
 async function openResult() {
@@ -1312,10 +1361,16 @@ function viewVote() {
     }).join("") + "</div></div>";
 
   if (hasVoted(mine, m.round)) {
+    var canEdit = !!myBallot(m.round);
     return toastHTML() +
       '<div class="panel stack"><div class="eyebrow">' + (m.round === 1 ? "1차 투표" : "결선 " + (m.round - 1) + "차") + "</div>" +
       '<h1 class="title">투표 완료</h1>' +
-      '<p class="lede">나머지 사람들을 기다리는 중이에요. 다 끝나면 아래 버튼으로 결과를 열 수 있어요.</p></div>' + progress;
+      '<p class="lede">나머지 사람들을 기다리는 중이에요. 다 끝나면 아래 버튼으로 결과를 열 수 있어요.</p>' +
+      (canEdit
+        ? '<button class="btn block" data-act="askedit">내 표 고치기</button>' +
+          '<p class="muted">고른 곳과 코멘트를 바꿀 수 있어요. 다른 사람 표는 그대로예요.</p>'
+        : '<p class="muted">이 라운드에 낸 표를 찾지 못했어요.</p>') +
+      "</div>" + progress;
   }
 
   var cards = cands.map(function (id) {
@@ -1677,6 +1732,15 @@ function renderModal() {
       '<button class="btn red" style="flex:1" data-act="submit">제출하기</button>' +
       '<button class="btn ghost" data-act="closemodal">더 고칠래요</button></div></div></div></div>';
   }
+  if (modalView === "editballot") {
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">내 표 고치기</div>' +
+      '<h1 class="title" style="font-size:24px">낸 표를 되돌릴까요?</h1></div>' +
+      '<p class="lede">고른 곳과 코멘트가 그대로 불러와집니다. 고친 뒤 다시 제출해야 반영돼요. ' +
+      '<b>다른 사람 표는 건드리지 않습니다.</b></p>' +
+      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doedit">되돌리기</button>' +
+      '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
+  }
   if (modalView === "openresult") {
     var leftN = S.voters.length - votedCount(M().round);
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
@@ -1692,10 +1756,11 @@ function renderModal() {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">1차 투표</div>' +
       '<h1 class="title" style="font-size:24px">이미 낸 표가 ' + n1 + '장 있어요</h1></div>' +
-      '<p class="lede">이어서 하면 그 표를 그대로 두고 아직 안 한 사람만 투표합니다. ' +
-      '여행지를 새로 추가했다면 먼저 낸 사람은 그 곳을 못 봤다는 점만 감안하세요.</p>' +
+      '<p class="lede"><b>이어서 하기</b> — 낸 표는 그대로 두고 아직 안 한 사람만 투표합니다. ' +
+      '이미 낸 사람은 각자 "내 표 고치기" 로 자기 표만 바꿀 수 있어요.<br><br>' +
+      '<b>모두 다시</b> — 참가자 전원의 이번 라운드 표와 코멘트를 지우고 처음부터 다시 합니다.</p>' +
       '<div class="btn-row"><button class="btn red" style="flex:1" data-act="startvotekeep">이어서 하기</button>' +
-      '<button class="btn" data-act="startvotefresh">표 지우고 새로</button></div>' +
+      '<button class="btn" data-act="startvotefresh">모두 다시</button></div>' +
       '<button class="btn ghost block" data-act="closemodal">그만두기</button></div></div></div>';
   }
   if (modalView === "home") {
@@ -1793,6 +1858,8 @@ document.addEventListener("click", function (e) {
   else if (act === "startvotekeep") startVote("keep");
   else if (act === "startvotefresh") startVote("fresh");
   else if (act === "doopenresult") openResult();
+  else if (act === "askedit") { modalView = "editballot"; render(); }
+  else if (act === "doedit") editMyBallot();
   else if (act === "leavehome") { draft = null; modalView = null; goHome(); }
   else if (act === "createroom") {
     var tf = document.querySelector('[data-keep="roomtitle"]');
