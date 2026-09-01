@@ -112,6 +112,8 @@ var tagDraft = [];         // 편집 중인 태그 목록
 var tagText = "";          // 태그 입력창에 치고 있는 글자
 var identified = false;    // 이 방에서 '나는 누구인지' 확인을 마쳤는가
 var showHeat = false;      // 결과 화면의 달력 히트맵 펼침
+var showPlaces = false;    // 확정 화면의 여행지 정보 펼침
+var viewStep = null;       // 헤더 숫자로 지난 단계를 '보는 중' (방 단계는 그대로)
 var titleEdit = false;     // 여행 이름 바꾸는 중
 var titleDraft = "";       // 바꾸는 중인 이름
 
@@ -124,6 +126,19 @@ var spinSeen = {};
 var wheelBusy = false;
 
 function M() { return S.meta || DEFAULT_META; }
+
+/* 방 단계를 1~5 숫자로. 1(참가·날짜)은 개인 단계라 방에는 없습니다. */
+function stepOfPhase(m) {
+  if (m.phase === "done") return 5;
+  if (m.phase === "choose" || m.phase === "wheel") return 4;
+  if (m.phase === "vote" || m.phase === "result") return m.round === 1 ? 3 : 4;
+  return 2;
+}
+function reachedStep() {
+  var m = M();
+  return Math.max(m.reached || 2, stepOfPhase(m));
+}
+function liveStep() { return stepOfPhase(M()); }
 function votesFor(round) { return round === 1 ? VOTES_R1 : 1; }
 function placeById(id) { for (var i = 0; i < S.places.length; i++) if (S.places[i].id === id) return S.places[i]; return null; }
 function placeName(id) { var p = placeById(id); return p ? p.name : "(삭제된 여행지)"; }
@@ -205,6 +220,10 @@ async function fetchBallots() {
 
 var store = {
   setMeta: async function (patch) {
+    if (patch.phase) {
+      var next = Object.assign({}, M(), patch);
+      patch = Object.assign({}, patch, { reached: Math.max(M().reached || 2, stepOfPhase(next)) });
+    }
     if (mode === "shared") {
       var r = await sb.from("rooms").update(patch).eq("id", roomId);
       if (r.error) { say(writeError(r.error)); return; }
@@ -301,7 +320,7 @@ async function goHome() {
   S.meta = null; S.places = []; S.voters = []; S.ballots = [];
   draft = null; dateSel = null; editingDates = false;
   tagEditId = null; tagDraft = []; tagText = ""; search = ""; modalView = null;
-  identified = false; showHeat = false; titleEdit = false;
+  identified = false; showHeat = false; showPlaces = false; titleEdit = false; viewStep = null;
   location.hash = "";
   await fetchRooms();
   render();
@@ -310,7 +329,7 @@ async function goHome() {
 async function attachRoom(code, id) {
   roomCode = code; roomId = id; votersLoaded = false;
   identified = !!(me.id && LS.get("tv_who_" + code) === me.id);
-  showHeat = false; titleEdit = false;
+  showHeat = false; showPlaces = false; titleEdit = false; viewStep = null;
   sb = baseClient({ "x-room-code": code });
   await sb.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
   sb.realtime.setAuth(session.access_token);
@@ -498,6 +517,8 @@ function identifyAs(name) {
   }
   identified = true;
   LS.set(roomKey(), me.id);
+  var r = reachedStep();
+  viewStep = (r !== liveStep()) ? r : null;
   render();
 }
 
@@ -531,7 +552,7 @@ async function saveDatesOnly() {
   if (!v) { editingDates = false; render(); return; }
   if (!dateSel || dateSel.size === 0) { say("최소 하루는 골라 주세요."); return; }
   await store.setVoter({ client_id: me.id, name: v.name, rounds: v.rounds || {}, dates: Array.from(dateSel).sort(), vacation_days: vacNum() });
-  editingDates = false; dateSel = null;
+  editingDates = false; dateSel = null; viewStep = null;
   render();
 }
 
@@ -618,6 +639,7 @@ function backTarget() {
 async function goBack() {
   var t = backTarget();
   if (!t) return;
+  viewStep = null;
   var patch = { phase: t.phase };
   if (t.phase !== "done") patch.winner = null;
   if (t.phase === "choose" || t.phase === "result") patch.spin = null;
@@ -934,6 +956,7 @@ var STEPS = [
   { k: "done", label: "05 확정" }
 ];
 function stepKey() {
+  if (viewStep) return STEPS[viewStep - 1].k;
   if (needsRoom() || needsJoin() || editingDates) return "join";
   var m = M();
   if (m.phase === "lobby") return "lobby";
@@ -945,6 +968,61 @@ function needsRoom() { return mode === "shared" && !roomId; }
 /* 방에 들어오면 먼저 "누구세요" 를 묻습니다.
    이미 참가자 명단에 있는 이름이면 그 사람으로 이어서 보고 (다른 폰에서 들어와도 됨),
    처음 보는 이름이면 날짜부터 고르는 전체 흐름으로 보냅니다. */
+/* 헤더 숫자로 이동. 방 단계는 건드리지 않고 내 화면만 바꿉니다. */
+function goStep(n) {
+  n = Number(n);
+  if (n < 1 || n > Math.max(reachedStep(), 1)) return;
+  viewStep = (n === liveStep()) ? null : n;
+  editingDates = (n === 1);
+  if (editingDates) startDatePick(); else { dateSel = null; }
+  tagEditId = null; modalView = null;
+  render();
+}
+
+/* 한 라운드를 되돌아보는 읽기 전용 화면 */
+function viewRoundSummary(round) {
+  var counts = {}, n = 0;
+  S.places.forEach(function (p) { counts[p.id] = 0; });
+  S.ballots.forEach(function (b) {
+    if (b.round !== round) return;
+    n++;
+    (b.entries || []).forEach(function (e) { if (counts[e.place] != null) counts[e.place]++; });
+  });
+  var rows = S.places.map(function (p) { return { id: p.id, n: counts[p.id], name: p.name }; })
+    .filter(function (r) { return r.n > 0; })
+    .sort(function (a, b) { return b.n - a.n || a.name.localeCompare(b.name, "ko"); });
+
+  if (!rows.length) {
+    return stepBanner() +
+      '<div class="panel stack"><div class="eyebrow">' + roundLabel(round) + "</div>" +
+      '<h1 class="title">아직 표가 없어요</h1>' +
+      '<p class="lede">이 단계는 아직 진행되지 않았습니다.</p></div>';
+  }
+  var maxN = rows[0].n;
+  var rank = rows.map(function (r, i) {
+    var lead = r.n === maxN;
+    return '<div class="rrow' + (lead ? " lead" : "") + '"><div class="rpos">' + pad2(i + 1) + "</div>" +
+      '<div class="rname">' + esc(r.name) + '</div><div class="rnum">' + r.n + "표</div></div>" +
+      '<div class="bar"><span style="width:' + Math.round(r.n / maxN * 100) + "%;background:" +
+      (lead ? "var(--accent)" : "var(--ink-2)") + '"></span></div>';
+  }).join("");
+
+  return stepBanner() +
+    '<div class="stack"><div><div class="eyebrow">' + roundLabel(round) + " 기록 · " + n + "명 참여</div>" +
+    '<h1 class="title">이렇게 나왔어요</h1></div></div>' +
+    '<div class="panel"><div class="stack-sm">' + rank + "</div></div>" +
+    commentsPanel(round);
+}
+function roundLabel(round) { return round === 1 ? "1차 투표" : "결선 " + (round - 1) + "차"; }
+
+/* 지금 보고 있는 게 현재 단계가 아닐 때 알려 줍니다 */
+function stepBanner() {
+  if (!viewStep || viewStep === liveStep()) return "";
+  return '<div class="banner"><span class="mk">지난 단계</span>' +
+    '<span style="flex:1">지금 보고 있는 건 <b>' + STEPS[viewStep - 1].label + '</b> 기록이에요.</span>' +
+    '<button class="btn sm" data-act="golive">현재 단계로</button></div>';
+}
+
 function needsIdentify() {
   if (mode === "shared" && !votersLoaded) return false;
   if (needsRoom()) return false;
@@ -977,8 +1055,13 @@ function render() {
 
   var sk = stepKey(), cur = 0;
   STEPS.forEach(function (st, i) { if (st.k === sk) cur = i; });
+  var reach = needsRoom() ? 0 : Math.max(reachedStep(), 1);
   $("#steps").innerHTML = STEPS.map(function (st, i) {
-    return '<li class="' + (i === cur ? "on" : (i < cur ? "past" : "")) + '">' + st.label + "</li>";
+    var n = i + 1, can = n <= reach && !needsIdentify();
+    var cls = (i === cur ? "on" : (i < cur ? "past" : "")) + (can ? " go" : "");
+    return '<li class="' + cls + '">' + (can
+      ? '<button data-act="gostep" data-n="' + n + '">' + st.label + "</button>"
+      : st.label) + "</li>";
   }).join("");
 
   if (wheelBusy && m.phase === "wheel") return;
@@ -990,6 +1073,13 @@ function render() {
   else if (editingDates) html = viewDates();
   else if (needsIdentify()) html = viewIdentify();
   else if (needsDates()) html = viewJoin();
+  else if (viewStep && viewStep !== liveStep()) {
+    if (viewStep === 1) html = viewDates();
+    else if (viewStep === 2) html = stepBanner() + viewLobby();
+    else if (viewStep === 3) html = viewRoundSummary(1);
+    else if (viewStep === 4) html = viewRoundSummary(M().round > 1 ? M().round : 2);
+    else html = stepBanner() + viewDone();
+  }
   else if (m.phase === "lobby") html = viewLobby();
   else if (m.phase === "vote") html = viewVote();
   else if (m.phase === "result") html = viewResult();
@@ -1117,7 +1207,7 @@ function viewJoin() {
 
 function viewDates() {
   if (!dateSel) startDatePick();
-  return toastHTML() +
+  return toastHTML() + stepBanner() +
     '<div class="stack"><div><div class="eyebrow">내 날짜 수정</div><h1 class="title">가능한 날짜</h1></div>' +
     '<p class="lede">탭하면 하루, <b>꾹 눌렀다가 드래그</b>하면 여러 날을 한 번에 고를 수 있어요.</p></div>' +
     calHTML() + '<div class="panel stack-sm"><div class="eyebrow">휴가는 며칠까지</div>' +
@@ -1478,7 +1568,11 @@ function viewDone() {
       '<p class="muted">' + rec.dates.length + "일 (평일 " + rec.weekdays + "일) · " +
       rec.people + " / " + S.voters.length + "명 가능" +
       (rec.limit == null ? "" : " · 휴가 평일 " + rec.limit + "일 한도") + "</p></div>" : "") +
-    allComments + heatHTML() + placesPanel(candidateIds()) + shareCard();
+    allComments + heatHTML() +
+    '<button class="btn block" data-act="toggleplaces">' +
+      (showPlaces ? "여행지 정보 접기 ▲" : "여행지 정보 보기 ▼") + "</button>" +
+    (showPlaces ? placesPanel(S.places.map(function (p) { return p.id; })) : "") +
+    shareCard();
 }
 
 /* ============================================================
@@ -1494,6 +1588,10 @@ function renderDock() {
   } else if (needsDates()) {
     inner = '<button class="btn red block" data-act="join"' + (dateSel && dateSel.size ? "" : " disabled") + ">참가하기</button>";
     hint = dateSel && dateSel.size ? dateSel.size + "일 선택함" : "이름을 적고 가능한 날짜를 고르세요.";
+  } else if (viewStep && viewStep !== liveStep()) {
+    // 지난 단계를 보는 중에는 현재 단계 버튼을 노출하지 않습니다. 실수로 눌리면 안 되니까요.
+    inner = '<button class="btn block" data-act="golive">현재 단계로 돌아가기</button>';
+    hint = STEPS[viewStep - 1].label + ' 기록을 보는 중이에요.';
   } else if (m.phase === "lobby") {
     inner = '<button class="btn red block" data-act="startvote"' + (S.places.length < 2 ? " disabled" : "") + ">1차 투표 시작 · 한 명당 " + VOTES_R1 + "표</button>";
     hint = S.places.length < 2 ? "여행지를 2곳 이상 올리면 시작할 수 있어요." : S.places.length + "곳 · 참가자 " + S.voters.length + "명";
@@ -1693,6 +1791,9 @@ document.addEventListener("click", function (e) {
   else if (act === "iam") identifyAs(el.dataset.n);
   else if (act === "switchperson") switchPerson();
   else if (act === "toggleheat") { showHeat = !showHeat; render(); }
+  else if (act === "toggleplaces") { showPlaces = !showPlaces; render(); }
+  else if (act === "gostep") goStep(el.dataset.n);
+  else if (act === "golive") { viewStep = null; editingDates = false; dateSel = null; render(); }
   else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; render(); }
   else if (act === "savetitle") saveTitle();
   else if (act === "canceltitle") { titleEdit = false; titleDraft = ""; render(); }
