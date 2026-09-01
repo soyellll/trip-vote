@@ -192,8 +192,16 @@ textarea.field{resize:vertical;line-height:1.6;min-height:92px}
 
 /* ---------- heatmap ---------- */
 .heat-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
-.heat-cell{aspect-ratio:1;border-radius:3px;display:grid;place-items:center;
-  font-size:10px;font-family:var(--f-mono);color:var(--ink-3);background:var(--card-2)}
+.heat-grid.wd{gap:2px;margin-bottom:1px}
+.heat-wd{font-family:var(--f-mono);font-size:9px;text-align:center;color:var(--ink-3);padding:2px 0}
+.heat-wd.we{color:var(--accent)}
+.heat-cell{min-height:46px;border-radius:3px;background:var(--card-2);
+  display:flex;flex-direction:column;align-items:center;gap:1px;padding:3px 1px 4px;
+  color:var(--ink-3);overflow:hidden}
+.heat-cell.pad{background:transparent}
+.heat-cell .dd{font-family:var(--f-mono);font-size:9.5px;line-height:1;opacity:.8}
+.heat-cell .hnames{font-size:8.5px;line-height:1.2;text-align:center;overflow-wrap:anywhere;font-weight:500}
+.heat-cell .hnames.all{font-family:var(--f-mono);font-size:11px;font-weight:700;letter-spacing:.02em}
 .heat-cell.h1{background:color-mix(in srgb,var(--accent) 22%,var(--card));color:var(--ink-2)}
 .heat-cell.h2{background:color-mix(in srgb,var(--accent) 48%,var(--card));color:var(--ink)}
 .heat-cell.h3{background:color-mix(in srgb,var(--accent) 74%,var(--card));color:var(--on-accent)}

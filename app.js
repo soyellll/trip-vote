@@ -435,6 +435,15 @@ function outcome(round) {
   return { kind: "tie", why: "tie", finalists: leaders.map(function (r) { return r.id; }), rows: rows, ballots: t.ballots };
 }
 
+/* 날짜별로 가능한 사람 이름 */
+function dateNames() {
+  var m = {};
+  S.voters.forEach(function (v) {
+    voterDates(v).forEach(function (d) { (m[d] = m[d] || []).push(v.name); });
+  });
+  return m;
+}
+
 /* 날짜 집계 — 그 날 가능한 사람 수 */
 function dateCounts() {
   var c = {};
@@ -1366,17 +1375,32 @@ function heatHTML() {
   keys.forEach(function (d) { (byMonth[d.slice(0, 7)] = byMonth[d.slice(0, 7)] || []).push(d); });
   var C = window.TV.cal;
 
+  var names = dateNames();
+  var head = C.WEEKDAYS.map(function (w, i) {
+    return '<div class="heat-wd' + (i === 0 || i === 6 ? " we" : "") + '">' + w + "</div>";
+  }).join("");
+
   var grids = Object.keys(byMonth).sort().map(function (ym) {
     var y = Number(ym.slice(0, 4)), mm = Number(ym.slice(5));
     var lead = new Date(y, mm - 1, 1).getDay(), n = new Date(y, mm, 0).getDate();
     var cells = "", i, d;
-    for (i = 0; i < lead; i++) cells += '<div class="heat-cell"></div>';
+    for (i = 0; i < lead; i++) cells += '<div class="heat-cell pad"></div>';
     for (d = 1; d <= n; d++) {
-      var c = counts[C.iso(y, mm, d)] || 0, ratio = c / total;
+      var key = C.iso(y, mm, d);
+      var who = names[key] || [];
+      var c = who.length, ratio = c / total;
       var lvl = c === 0 ? "" : ratio >= 1 ? " h4" : ratio >= .66 ? " h3" : ratio >= .34 ? " h2" : " h1";
-      cells += '<div class="heat-cell' + lvl + '">' + (c || "") + "</div>";
+      // 전원 가능한 날은 이름을 늘어놓는 대신 ALL 한 글자로
+      var body = c === 0 ? ""
+        : (c === S.voters.length && S.voters.length > 1)
+          ? '<span class="hnames all">ALL</span>'
+          : '<span class="hnames">' + who.map(esc).join("<br>") + "</span>";
+      cells += '<div class="heat-cell' + lvl + '"><span class="dd">' + d + "</span>" + body + "</div>";
     }
+    var rest = (lead + n) % 7;
+    if (rest) for (i = rest; i < 7; i++) cells += '<div class="heat-cell pad"></div>';
     return '<div class="stack-sm"><div class="eyebrow">' + y + "." + pad2(mm) + "</div>" +
+      '<div class="heat-grid wd">' + head + "</div>" +
       '<div class="heat-grid">' + cells + "</div></div>";
   }).join("");
 
@@ -1398,7 +1422,7 @@ function heatHTML() {
     recBlock +
     '<button class="btn block" data-act="toggleheat">' +
       (showHeat ? "달력 접기 ▲" : "달력으로 보기 ▼") + "</button>" +
-    (showHeat ? '<p class="muted">숫자는 그날 가능한 사람 수예요.</p>' + grids : "") +
+    (showHeat ? '<p class="muted">각 날짜에 <b>그날 가능한 사람</b>이 적혀 있어요. 전원 가능한 날은 ALL 로 표시됩니다.</p>' + grids : "") +
     '<div class="stack-sm"><div class="eyebrow">참가자별 휴가</div><div class="chips">' +
     S.voters.map(function (v) {
       return '<span class="chip">' + esc(v.name) + '<span class="mk">' +
@@ -1415,7 +1439,7 @@ function viewResult() {
     return '<div class="rrow' + (lead ? " lead" : "") + '"><div class="rpos">' + pad2(i + 1) + "</div>" +
       '<div class="rname">' + esc(r.name) + '</div><div class="rnum">' + r.n + "표</div></div>" +
       '<div class="bar"><span style="width:' + Math.round(r.n / maxN * 100) + "%;background:" +
-      (lead ? "var(--red)" : "var(--ink)") + '"></span></div>';
+      (lead ? "var(--accent)" : "var(--ink-2)") + '"></span></div>';
   }).join("");
 
   var head, note;
@@ -1695,7 +1719,7 @@ function renderModal() {
       '<div class="stack"><div><div class="eyebrow">초기화</div>' +
       '<h1 class="title" style="font-size:24px">전부 지우고 다시 시작할까요?</h1></div>' +
       '<p class="lede">여행지 목록, 표, 코멘트, 참가자 날짜가 모두 사라져요. 되돌릴 수 없습니다.</p>' +
-      '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--red);color:var(--red)" data-act="doreset">지우고 새로 시작</button>' +
+      '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--accent);color:var(--accent)" data-act="doreset">지우고 새로 시작</button>' +
       '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
   }
   if (modalView === "handoff") {
