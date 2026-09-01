@@ -3,3 +3,6 @@ node_modules/
 supabase/.temp/
 .env
 .env.*
+serve.js
+.claude/
+_local.html
