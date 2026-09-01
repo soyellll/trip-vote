@@ -42,13 +42,17 @@ window.TRIP_VOTE_CONFIG = {
 
 ### 1-4. Edge Function 배포
 
+프로젝트 폴더에서 터미널을 열고 (전역 npm 설치는 Supabase 가 막아뒀으므로 `npx` 를 씁니다):
+
 ```bash
-npm i -g supabase
-supabase login
-supabase link --project-ref <프로젝트 ref>
-supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
-supabase functions deploy tone
+npx supabase@latest login
+npx supabase@latest link --project-ref <프로젝트 ref>
+npx supabase@latest secrets set ANTHROPIC_API_KEY=sk-ant-...
+npx supabase@latest functions deploy tone
 ```
+
+프로젝트 ref 는 대시보드 주소의 `/project/<ref>` 부분이고, 로그인 후
+`npx supabase@latest projects list` 로도 확인할 수 있습니다.
 
 배포 후 CORS 를 내 도메인으로 좁힙니다:
 
