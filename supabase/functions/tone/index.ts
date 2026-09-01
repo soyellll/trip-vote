@@ -100,6 +100,50 @@ Deno.serve(async (req) => {
   if (quotaErr) return json({ error: "quota_check_failed" }, 500);
   if (!allowed) return json({ error: "rate_limited", limit: HOURLY_LIMIT }, 429);
 
+  // --- 임시 진단 블록 (확인 후 제거) ---
+  if (body?.__probe) {
+    const k = Deno.env.get("GEMINI_API_KEY") ?? "";
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+      method: "POST",
+      headers: { "x-goog-api-key": k, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: MODEL, input: "say hi in korean, one word" }),
+    });
+    await r.text();
+    const H = { "x-goog-api-key": k, "Content-Type": "application/json" };
+
+    // 이 키로 실제 보이는 모델 목록
+    const lr = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", { headers: H });
+    const lj = await lr.json().catch(() => ({}));
+    const available: string[] = (lj.models ?? []).map((m: { name: string }) => m.name);
+
+    // 후보 모델 × 두 엔드포인트를 전수로 시도
+    const candidates: string[] = body.__models ?? ["gemini-3.5-flash"];
+    const tries: Array<Record<string, unknown>> = [];
+    for (const m of candidates) {
+      const a = await fetch("https://generativelanguage.googleapis.com/v1beta/interactions", {
+        method: "POST", headers: H, body: JSON.stringify({ model: m, input: "안녕" }),
+      });
+      const at = await a.text();
+      tries.push({ model: m, ep: "interactions", status: a.status, body: at.slice(0, 140) });
+
+      const b = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`, {
+        method: "POST", headers: H,
+        body: JSON.stringify({ contents: [{ parts: [{ text: "안녕" }] }] }),
+      });
+      const bt = await b.text();
+      tries.push({ model: m, ep: "generateContent", status: b.status, body: bt.slice(0, 140) });
+    }
+
+    return json({
+      keyLen: k.length,
+      keyPrefix: k.slice(0, 6),
+      listModelsStatus: lr.status,
+      availableCount: available.length,
+      available: available.slice(0, 40),
+      tries,
+    });
+  }
+
   // 5) 변환. 원문은 응답에도, 로그에도 남기지 않습니다.
   try {
     const interaction = await ai.interactions.create({
@@ -116,9 +160,10 @@ Deno.serve(async (req) => {
     return json({ text: cleaned });
   } catch (e) {
     const status = (e as { status?: number })?.status;
-    console.error("tone failed", status ?? "unknown");   // 원문은 찍지 않습니다
+    const msg = (e as Error)?.message ?? String(e);
+    console.error("tone failed", status ?? "unknown", msg);   // 원문은 찍지 않습니다
     // 무료 티어는 분당 10회 / 하루 250회 상한이 있고, 둘 다 429 로 옵니다.
     if (status === 429) return json({ error: "upstream_rate_limited" }, 429);
-    return json({ error: "upstream_failed" }, 502);
+    return json({ error: "upstream_failed", debug: msg.slice(0, 500) }, 502);
   }
 });

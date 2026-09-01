@@ -4,7 +4,7 @@
  *   shared : Supabase (여러 폰에서 링크로 접속, 실시간 동기화)
  *   local  : config.js 가 비어 있거나 접속이 안 될 때. 한 기기에서 폰을 돌려가며 사용.
  *
- * AI 말투 변환은 Supabase Edge Function 을 거칩니다. API 키는 클라이언트에 없습니다.
+ * 코멘트는 브라우저에서 규칙 기반으로 "번역기 말투"로 변환됩니다. 서버도 API 키도 쓰지 않습니다.
  */
 (function () {
 "use strict";
@@ -48,7 +48,6 @@ function makeCode() {
 var CFG = window.TRIP_VOTE_CONFIG || {};
 var CONFIGURED = !!(CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY &&
                     CFG.SUPABASE_URL.indexOf("YOUR-") < 0 && CFG.SUPABASE_ANON_KEY.indexOf("YOUR-") < 0);
-var FN_URL = CONFIGURED ? CFG.SUPABASE_URL.replace(/\/$/, "") + "/functions/v1/tone" : "";
 
 var sb = null;          // 방 코드 헤더가 붙은 클라이언트
 var authClient = null;  // 로그인 전용
@@ -313,73 +312,143 @@ function outcome(round) {
 }
 
 /* ============================================================
-   6. AI 말투 변환
+   6. 번역기 말투 변환 — 서버도 API 키도 없이 브라우저에서 바로 돕니다.
+      완벽한 문법 교정이 아니라 "말투 지문 지우기"가 목적입니다. 결정적(deterministic)이라
+      누가 써도 같은 문체로 수렴하고, 그게 익명성에 도움이 됩니다.
    ============================================================ */
-var TONE_ERRORS = {
-  unauthorized: "로그인이 풀렸어요. 새로고침한 뒤 다시 시도해 주세요.",
-  too_long: "원문이 " + COMMENT_MAX + "자를 넘었어요. 줄여 주세요.",
-  empty: "내용을 먼저 적어 주세요.",
-  no_room: "방을 확인할 수 없어요. 링크를 다시 열어 주세요.",
-  rate_limited: "변환을 너무 많이 했어요. 한 시간 뒤에 다시 됩니다.",
-  upstream_rate_limited: "AI 변환 한도에 걸렸어요. 잠시 뒤 다시 눌러 보고, 계속 안 되면 원문 그대로 제출하세요.",
-  refused: "이 내용은 변환할 수 없어요. 다르게 적어 주세요.",
-  empty_completion: "변환 결과가 비었어요. 다시 시도해 주세요.",
-  upstream_failed: "변환에 실패했어요. 다시 시도해 주세요."
-};
 
-async function convert(placeId) {
+/* 지문 제거: 이모지, 자음·모음 단독(ㅋㅋ ㅠㅠ), 반복 부호, 물결 */
+function cleanTone(s) {
+  return String(s || "")
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}\u{2B00}-\u{2BFF}]/gu, " ")
+    .replace(/[ㄱ-ㅎㅏ-ㅣ]+/g, " ")
+    .replace(/~+/g, "")
+    .replace(/([!?.,])\1+/g, "$1")
+    .replace(/!/g, ".")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/* 은어·줄임말 → 표준 어휘. 어미를 먹지 않도록 단어 통째로 ㅁ체에 맞춰 매핑합니다. */
+var LEXICON = [
+  [/존맛탱|존맛|JMT|jmt/gi, "매우 맛있음"],
+  [/(?:개꿀|꿀잼|존잼|짱잼)(?:임|이야|이다)?/g, "매우 만족스러움"],
+  [/노잼/g, "재미없음"],
+  [/미쳤음|미쳤다|미쳤어|미침|쩐다|쩔어|지린다|지림/g, "훌륭함"],
+  [/짱이야|짱임|짱이다/g, "훌륭함"],
+  [/개편함|개편해/g, "매우 편리함"],
+  [/개좋아함|개좋음|개좋아/g, "매우 좋음"],
+  [/개싸다|개쌈|개싸/g, "매우 저렴함"],
+  [/개비싸다|개비쌈/g, "매우 비쌈"],
+  [/개멀다|개멂|개멀음/g, "매우 멂"],
+  [/강추/g, "적극 추천함"],
+  [/비추/g, "추천하지 않음"],
+  [/갬성/g, "감성"],
+  [/가성비/g, "가격 대비 만족도"],
+  [/인생샷/g, "인상적인 사진"],
+  [/핫플/g, "인기 있는 장소"],
+  [/맛집/g, "좋은 음식점"],
+  [/보고싶/g, "보고 싶"],
+  [/가고싶/g, "가고 싶"],
+  [/개(?=[가-힣])/g, "매우 "],
+  [/졸라|존나|겁나|엄청|되게/g, "매우"],
+  [/짱/g, "매우"],
+  [/(^|\s)나는(?=\s|$)/g, "$1저는"],
+  [/(^|\s)내가(?=\s|$)/g, "$1제가"],
+  [/(^|\s)나도(?=\s|$)/g, "$1저도"],
+  [/(^|\s)나(?=\s)/g, "$1저"],
+  [/진짜|레알/g, "정말"],
+  [/걍/g, "그냥"],
+  [/넘(?=\s)/g, "너무"],
+  [/젤(?=\s)/g, "가장"],
+];
+
+/* ㅁ으로 끝나지만 종결어미가 아닌 흔한 명사 — 문장 분리에서 제외 */
+var NOT_ENDING = /^(다음|처음|마음|얼음|죽음|웃음|울음|걸음|게임|모임|소음|이음|봄|밤|담|샴|팀|셈|점|힘|참)$/;
+
+/* 종결어미 → 격식체. 자주 쓰는 용언 먼저, 그다음 일반 규칙.
+   대안(|)마다 캡처 그룹을 따로 두면 $1 이 비어 문장이 통째로 날아갑니다. */
+var ENDINGS = [
+  [/있(어요|어|다|음|네요|네|지|거든요|거든|잖아요|잖아|더라)$/, "있습니다"],
+  [/없(어요|어|다|음|네요|네|지|거든요|거든|잖아요|잖아|더라)$/, "없습니다"],
+  [/좋(아요|아|다|음|네요|네|지|거든요|거든|잖아요|잖아|더라)$/, "좋습니다"],
+  [/싫(어요|어|다|음|네요|네|더라)$/, "별로입니다"],
+  [/싶(어요|어|다|음|네요|네|어라)$/, "싶습니다"],
+  [/같(아요|아|다|음|네요|네|더라)$/, "같습니다"],
+  [/많(아요|아|다|음|네요|네|더라)$/, "많습니다"],
+  [/맛있(어요|어|다|음|네요|네|더라)$/, "맛있습니다"],
+  [/재밌(어요|어|다|음|네요|네)$|재미있(어요|어|다|음)$/, "흥미롭습니다"],
+  [/비싸(요|다|지|네요|네)$|비쌈$/, "비쌉니다"],
+  [/싸(요|다|지|네요|네)$|쌈$/, "저렴합니다"],
+  [/멀(어요|어|다|네요|네|음)$|멂$/, "멉니다"],
+  [/가까(워요|워|움|웠어)$|가깝(다|네요|네)$/, "가깝습니다"],
+  [/예뻐요$|예뻐$|예쁨$|예쁘다$|이쁨$|이쁘다$|이뻐$/, "아름답습니다"],
+  [/(?:하고\s*)?싶(어요|어|음|다)$/, "하고 싶습니다"],
+  [/(?:들|하)?자$/, "하고 싶습니다"],
+  [/(?:않나|않냐|아닌가|아냐)\??$/, "않은지 궁금합니다"],
+  [/듦$|듬$/, "듭니다"],
+  [/(.+?)(?:ㄹ|을|일)\s*듯$/, "$1을 것 같습니다"],
+  [/(.+?)\s*듯$/, "$1 것 같습니다"],
+  [/스러움$/, "스럽습니다"],
+  [/러움$|로움$/, "롭습니다"],
+  [/(.+?)(?:거야|거지|거임|건데)$/, "$1것입니다"],
+  [/(.+?)(?:인듯|인 듯)$/, "$1인 것 같습니다"],
+  [/(.+?)(?:이에요|예요|이야|이다)$/, "$1입니다"],
+  [/(.+?)됨$/, "$1됩니다"],
+  [/(.+?)함$/, "$1합니다"],
+  [/(.+?)임$/, "$1입니다"],
+  [/(.+?)(?:해요|해)$/, "$1합니다"],
+  [/(.+?)(?:어요|아요)$/, "$1습니다"],
+  [/(.+?)음$/, "$1습니다"],
+];
+
+function formalize(clause) {
+  var s = clause.trim().replace(/[.?!,]+$/, "").trim();
+  if (!s) return "";
+  for (var i = 0; i < ENDINGS.length; i++) {
+    if (ENDINGS[i][0].test(s)) return s.replace(ENDINGS[i][0], ENDINGS[i][1]) + ".";
+  }
+  return s + ".";   // 규칙에 없으면 그대로 두고 마침표만
+}
+
+function translatorize(raw) {
+  var s = cleanTone(raw);
+  LEXICON.forEach(function (r) { s = s.replace(r[0], r[1]); });
+
+  // 문장부호 없이 이어 쓴 글을 ㅁ체 경계에서 끊어 줍니다.
+  s = s.replace(/([가-힣]{0,6}[음함임됨듦])\s+(?=[가-힣])/g, function (m, w) {
+    return NOT_ENDING.test(w) ? m : w + ". ";
+  });
+
+  return s.split(/(?<=[.?])\s*/)
+    .filter(function (p) { return p.trim(); })
+    .map(formalize)
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+\./g, ".")
+    .trim();
+}
+
+function convert(placeId) {
   var raw = (draft.raw[placeId] || "").trim();
   if (!raw) return;
   if (chars(raw) > COMMENT_MAX) {
-    draft.status[placeId] = "error"; draft.err[placeId] = TONE_ERRORS.too_long; render(); return;
-  }
-  if (mode !== "shared") {
     draft.status[placeId] = "error";
-    draft.err[placeId] = "AI 변환 서버에 연결되어 있지 않아요. 아래 버튼으로 다듬거나 원문 그대로 쓸 수 있어요.";
-    render(); return;
+    draft.err[placeId] = "원문이 " + COMMENT_MAX + "자를 넘었어요. 줄여 주세요.";
+    render();
+    return;
   }
-
-  draft.status[placeId] = "busy"; draft.ai[placeId] = ""; draft.err[placeId] = "";
-  render();
-
-  try {
-    var fresh = await sb.auth.getSession();
-    var token = fresh.data.session ? fresh.data.session.access_token : session.access_token;
-    var res = await fetch(FN_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "apikey": CFG.SUPABASE_ANON_KEY,
-        "Authorization": "Bearer " + token
-      },
-      body: JSON.stringify({ text: raw, place: placeName(placeId), roomCode: roomCode })
-    });
-    var j = await res.json().catch(function () { return {}; });
-    if (!draft) return;
-    if (!res.ok) {
-      draft.status[placeId] = "error";
-      draft.err[placeId] = TONE_ERRORS[j.error] || TONE_ERRORS.upstream_failed;
-    } else {
-      draft.ai[placeId] = String(j.text || "").trim();
-      draft.status[placeId] = draft.ai[placeId] ? "ready" : "error";
-      if (!draft.ai[placeId]) draft.err[placeId] = TONE_ERRORS.empty_completion;
-    }
-  } catch (e) {
-    if (!draft) return;
+  var out = translatorize(raw);
+  if (!out) {
     draft.status[placeId] = "error";
-    draft.err[placeId] = "변환 서버에 연결하지 못했어요. 다시 시도해 주세요.";
+    draft.err[placeId] = "바꿀 내용이 없어요. 다시 적어 주세요.";
+  } else {
+    draft.ai[placeId] = out.slice(0, COMMENT_MAX);
+    draft.status[placeId] = "ready";
+    draft.err[placeId] = "";
   }
   render();
-}
-
-/* 서버 없이 쓰는 최소 대비책. 말투를 바꾸지는 못하고 눈에 띄는 흔적만 지웁니다. */
-function scrub(s) {
-  return String(s || "")
-    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2190}-\u{21FF}\u{FE0F}\u{200D}]/gu, "")
-    .replace(/[ㄱ-ㆎ]+/g, "")
-    .replace(/([!?~.,])\1{1,}/g, "$1")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 /* ============================================================
@@ -608,7 +677,7 @@ function modeBanner() {
   if (mode === "local") {
     return '<div class="banner"><span class="mk">단말 모드</span><span>' +
       (CONFIGURED
-        ? "서버에 연결하지 못했어요. 지금은 <b>이 기기에만</b> 저장되고, AI 변환도 쓸 수 없습니다."
+        ? "서버에 연결하지 못했어요. 지금은 <b>이 기기에만</b> 저장됩니다."
         : "아직 서버 설정 전이라 <b>이 기기에만</b> 저장돼요. 폰을 돌려가며 한 명씩 투표하면 됩니다.") +
       "</span></div>";
   }
@@ -744,7 +813,7 @@ function viewVote() {
     '<div class="stack">' +
       '<div><div class="eyebrow">' + (m.round === 1 ? "단계 02 · 1차 투표" : "단계 03 · 결선 " + (m.round - 1) + "차") + "</div>" +
       '<h1 class="title">' + (m.round === 1 ? "두 곳을 고르세요" : "한 곳만 고르세요") + "</h1></div>" +
-      '<p class="lede">지금 <b>' + d.picks.length + " / " + max + "표</b> 썼어요. 고른 곳마다 이유를 남길 수 있고, 남긴 이유는 <b>AI 말투로 바꾼 뒤에만</b> 제출돼요.</p>" +
+      '<p class="lede">지금 <b>' + d.picks.length + " / " + max + "표</b> 썼어요. 고른 곳마다 이유를 남길 수 있고, 남긴 이유는 <b>번역기 말투로 바꾼 뒤에만</b> 제출돼요.</p>" +
     "</div>" +
     '<div class="stack" style="gap:14px">' + cardsHTML + "</div>" +
     progress;
@@ -775,21 +844,21 @@ function composer(id) {
     body = '<div class="aibox" id="ai-' + id + '">' + esc(raw) + "</div>" +
       '<p class="muted">변환 없이 이대로 제출돼요. 말투로 누군지 드러날 수 있어요.</p>' +
       '<div class="btn-row">' +
-        '<button class="btn sm" data-act="convert" data-id="' + id + '">AI 말투로 변환</button>' +
+        '<button class="btn sm" data-act="convert" data-id="' + id + '">번역기 말투로 바꾸기</button>' +
         '<button class="btn sm ghost" data-act="unlock" data-id="' + id + '">고치기</button>' +
       "</div>";
   } else {
     body = (err ? '<div class="aibox err">' + esc(err) + "</div>" : "") +
       '<div class="btn-row">' +
-        '<button class="btn sm primary" data-act="convert" data-id="' + id + '"' + (raw.trim() && !over ? "" : " disabled") + ">AI 말투로 변환</button>" +
+        '<button class="btn sm primary" data-act="convert" data-id="' + id + '"' + (raw.trim() && !over ? "" : " disabled") + ">번역기 말투로 바꾸기</button>" +
         '<button class="btn sm ghost" data-act="useraw" data-id="' + id + '"' + (raw.trim() && !over ? "" : " disabled") + ">원문 그대로 쓰기</button>" +
-        (err ? '<button class="btn sm ghost" data-act="scrub" data-id="' + id + '">기호·말버릇만 지우기</button>' : "") +
+        
       "</div>";
   }
 
   var editor = (st === "ready" || st === "raw" || st === "busy") ? "" :
     '<textarea class="field" data-keep="raw-' + id + '" data-raw="' + id + '" maxlength="' + COMMENT_MAX + '" ' +
-    'placeholder="여기는 평소 말투 그대로 편하게 쓰세요. 제출 전에 AI 말투로 바꿔 줄게요.">' + esc(raw) + "</textarea>" +
+    'placeholder="여기는 평소 말투 그대로 편하게 쓰세요. 제출 전에 번역기 말투로 바꿔 줄게요.">' + esc(raw) + "</textarea>" +
     '<div class="counter' + (over ? " over" : "") + '" id="cnt-' + id + '">' + len + " / " + COMMENT_MAX + "</div>";
 
   return '<div class="compose">' +
@@ -986,7 +1055,7 @@ function renderDock() {
       var blocked = draft ? draftBlocked() : [];
       inner = '<button class="btn primary block" data-act="review"' + (canSubmit() ? "" : " disabled") + ">확인하고 투표하기</button>";
       hint = !draft || draft.picks.length === 0 ? "최소 한 곳은 골라 주세요."
-        : blocked.length ? "코멘트를 쓴 곳은 " + COMMENT_MAX + "자 이내로 줄이고 AI 변환까지 마쳐야 제출할 수 있어요."
+        : blocked.length ? "코멘트를 쓴 곳은 " + COMMENT_MAX + "자 이내로 줄이고 말투 변환까지 마쳐야 제출할 수 있어요."
         : draft.picks.length + "곳 선택함";
     }
   } else if (m.phase === "result") {
@@ -1108,7 +1177,6 @@ document.addEventListener("click", function (e) {
   else if (act === "pick") togglePick(id);
   else if (act === "convert") convert(id);
   else if (act === "useraw") { ensureDraft(); draft.status[id] = "raw"; render(); }
-  else if (act === "scrub") { ensureDraft(); draft.raw[id] = scrub(draft.raw[id]); draft.status[id] = "raw"; draft.err[id] = ""; render(); }
   else if (act === "unlock") { ensureDraft(); draft.status[id] = "idle"; draft.err[id] = ""; render(); }
   else if (act === "review") { if (canSubmit()) { modalView = "confirm"; render(); } }
   else if (act === "submit") submitBallot();
