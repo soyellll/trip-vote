@@ -4,6 +4,6 @@
 //
 // !! ANTHROPIC_API_KEY 는 절대 이 파일에 넣지 마세요. Edge Function 의 secret 으로만 둡니다.
 window.TRIP_VOTE_CONFIG = {
-  SUPABASE_URL: "https://YOUR-PROJECT.supabase.co",
-  SUPABASE_ANON_KEY: "YOUR-ANON-KEY"
+  SUPABASE_URL: "https://zybubuulwwhjbugqfmnm.supabase.co",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inp5YnVidXVsd3doamJ1Z3FmbW5tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgyMjI5MjAsImV4cCI6MjEwMzc5ODkyMH0.6OTalQwH5tqp809Lh4y2yrSixzauQnh8QUPU3XOeAEU"
 };
