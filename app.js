@@ -525,8 +525,12 @@ async function addCustomPlace() {
   render();
 }
 
-async function startVote() {
+async function startVote(mode2) {
   if (S.places.length < 2) { say("여행지를 2곳 이상 올려 주세요."); return; }
+  var already = S.ballots.filter(function (b) { return b.round === 1; }).length;
+  if (already && !mode2) { modalView = "restart"; render(); return; }
+  if (mode2 === "fresh") await clearRound(1);
+  modalView = null;
   resetDraft(1);
   await store.setMeta({
     phase: "vote", round: 1,
@@ -560,7 +564,58 @@ async function submitBallot() {
   render();
 }
 
-async function openResult() { await store.setMeta({ phase: "result" }); if (mode === "shared") await fetchBallots(); }
+/* 지금 화면에서 한 단계 뒤로. 데이터를 지우지 않고 단계만 되돌립니다.
+   특히 result -> vote 는 "결과를 너무 일찍 열었다" 를 되돌리는 통로입니다.
+   되돌아가면 아직 투표 못 한 사람과 새로 들어온 사람이 다시 참여할 수 있습니다. */
+function backTarget() {
+  if (mode !== "shared" && mode !== "local") return null;
+  if (needsRoom() || needsJoin() || editingDates) return null;
+  var m = M();
+  if (m.phase === "vote") return m.round === 1 ? { phase: "lobby" } : { phase: "choose" };
+  if (m.phase === "result") return { phase: "vote" };
+  if (m.phase === "choose") return { phase: "result" };
+  if (m.phase === "wheel") return { phase: "choose" };
+  if (m.phase === "done") return m.tiebreak === "wheel" ? { phase: "wheel" } : { phase: "result" };
+  return null;
+}
+
+async function goBack() {
+  var t = backTarget();
+  if (!t) return;
+  var patch = { phase: t.phase };
+  if (t.phase !== "done") patch.winner = null;
+  if (t.phase === "choose" || t.phase === "result") patch.spin = null;
+  await store.setMeta(patch);
+  if (mode === "shared") await fetchBallots();
+  render();
+}
+
+/** 한 라운드의 표와 '투표함' 표시를 지웁니다. 참가자·날짜·여행지는 그대로. */
+async function clearRound(round) {
+  if (mode === "shared") {
+    var ids = S.ballots.filter(function (b) { return b.round === round; }).map(function (b) { return b.id; });
+    for (var i = 0; i < ids.length; i++) await sb.from("ballots").delete().eq("id", ids[i]);
+  } else {
+    S.ballots = S.ballots.filter(function (b) { return b.round !== round; });
+  }
+  for (var j = 0; j < S.voters.length; j++) {
+    var v = S.voters[j];
+    if (!hasVoted(v, round)) continue;
+    var rounds = Object.assign({}, v.rounds || {});
+    delete rounds["r" + round];
+    await store.setVoter({ client_id: v.client_id, name: v.name, rounds: rounds, dates: voterDates(v), vacation_days: voterVac(v) });
+  }
+  if (mode === "shared") await fetchBallots(); else localSave();
+}
+
+async function openResult() {
+  var m = M();
+  var left = S.voters.length - votedCount(m.round);
+  if (left > 0 && modalView !== "openresult") { modalView = "openresult"; render(); return; }
+  modalView = null;
+  await store.setMeta({ phase: "result" });
+  if (mode === "shared") await fetchBallots();
+}
 async function confirmWin(id) { await store.setMeta({ phase: "done", winner: id }); }
 async function goChoose(f) { await store.setMeta({ phase: "choose", finalists: f, candidates: f, tiebreak: null }); }
 async function pickRevote() {
@@ -865,6 +920,9 @@ function render() {
     : !roomId ? "방 없음"
     : (me.name ? esc(me.name) : "이름 없음") + " · " + S.voters.length + "명";
 
+  var bb = document.getElementById("backbtn");
+  if (bb) { if (backTarget()) bb.removeAttribute("hidden"); else bb.setAttribute("hidden", ""); }
+
   var sk = stepKey(), cur = 0;
   STEPS.forEach(function (st, i) { if (st.k === sk) cur = i; });
   $("#steps").innerHTML = STEPS.map(function (st, i) {
@@ -975,7 +1033,7 @@ function viewJoin() {
     '<h1 class="title">' + (me.name ? "가능한 날짜를<br>골라 주세요" : "이름과<br>가능한 날짜") + "</h1></div>" +
     '<p class="lede">이름은 누가 참여했는지 표시하는 데만 써요. <b>표와 코멘트는 이름과 연결되지 않습니다.</b></p></div>' +
     '<input class="field" data-keep="joinname" maxlength="12" placeholder="이름 (예: 지수)" value="' + esc(me.name) + '" autocomplete="off">' +
-    '<div class="stack-sm"><div class="eyebrow">2027년 · 가능한 날짜를 모두 고르세요</div>' +
+    '<div class="stack-sm"><div class="eyebrow">' + (M().year || window.TV.cal.YEAR) + '년 · 가능한 날짜를 모두 고르세요</div>' +
     '<p class="muted">탭하면 하루가 선택돼요. <b>꾹 눌렀다가 드래그</b>하면 여러 날을 한 번에 고를 수 있어요.</p>' +
     calHTML() + "</div>" + '<div class="panel stack-sm"><div class="eyebrow">휴가는 며칠까지</div>' +
     '<p class="muted">주말 빼고 <b>평일 기준</b>으로 최대 며칠 쓸 수 있는지 적어 주세요. 비워도 됩니다.</p>' +
@@ -1402,6 +1460,27 @@ function renderModal() {
       '<button class="btn red" style="flex:1" data-act="submit">제출하기</button>' +
       '<button class="btn ghost" data-act="closemodal">더 고칠래요</button></div></div></div></div>';
   }
+  if (modalView === "openresult") {
+    var leftN = S.voters.length - votedCount(M().round);
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">결과 열기</div>' +
+      '<h1 class="title" style="font-size:24px">아직 ' + leftN + '명이 투표 전이에요</h1></div>' +
+      '<p class="lede">지금 열면 <b>그 사람들은 이번 라운드에 투표할 수 없습니다.</b> 새로 들어오는 사람도 마찬가지예요. ' +
+      '열고 나서도 헤더의 <b>←</b> 로 다시 투표를 열 수 있습니다.</p>' +
+      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doopenresult">그래도 열기</button>' +
+      '<button class="btn ghost" data-act="closemodal">기다리기</button></div></div></div></div>';
+  }
+  if (modalView === "restart") {
+    var n1 = S.ballots.filter(function (b) { return b.round === 1; }).length;
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">1차 투표</div>' +
+      '<h1 class="title" style="font-size:24px">이미 낸 표가 ' + n1 + '장 있어요</h1></div>' +
+      '<p class="lede">이어서 하면 그 표를 그대로 두고 아직 안 한 사람만 투표합니다. ' +
+      '여행지를 새로 추가했다면 먼저 낸 사람은 그 곳을 못 봤다는 점만 감안하세요.</p>' +
+      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="startvotekeep">이어서 하기</button>' +
+      '<button class="btn" data-act="startvotefresh">표 지우고 새로</button></div>' +
+      '<button class="btn ghost block" data-act="closemodal">그만두기</button></div></div></div>';
+  }
   if (modalView === "home") {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">나가기</div>' +
@@ -1492,6 +1571,10 @@ document.addEventListener("click", function (e) {
   var act = el.dataset.act, id = el.dataset.id;
 
   if (act === "home") goHome();
+  else if (act === "back") goBack();
+  else if (act === "startvotekeep") startVote("keep");
+  else if (act === "startvotefresh") startVote("fresh");
+  else if (act === "doopenresult") openResult();
   else if (act === "leavehome") { draft = null; modalView = null; goHome(); }
   else if (act === "createroom") {
     var tf = document.querySelector('[data-keep="roomtitle"]');

@@ -73,6 +73,9 @@ button{cursor:pointer}
 .brand{font-family:var(--f-display);font-weight:900;font-size:17px;letter-spacing:-.03em;line-height:1.1;
   background:none;border:0;padding:0;color:inherit;text-align:left}
 .brand em{font-style:normal;color:var(--accent)}
+.backbtn{width:30px;height:30px;flex:none;border-radius:50%;border:2px solid var(--ink);
+  background:var(--card);color:var(--ink);font-size:15px;line-height:1;display:grid;place-items:center;padding:0}
+.backbtn[hidden]{display:none}
 .who{font-family:var(--f-mono);font-size:10.5px;color:var(--ink-2);white-space:nowrap;
   border:1.5px solid var(--line);border-radius:999px;padding:3px 9px}
 .steps{display:flex;gap:0;margin:9px 0 0;list-style:none;padding:0}
@@ -304,7 +307,10 @@ input.uppercase{text-transform:uppercase;letter-spacing:.2em;font-family:var(--f
 <div class="app">
   <header class="top">
     <div class="top-row">
-      <button class="brand" data-act="home" title="여행 목록으로">Moïse <em>다음 여행지</em></button>
+      <div style="display:flex;align-items:center;gap:9px;min-width:0">
+        <button class="backbtn" id="backbtn" data-act="back" hidden aria-label="뒤로">&#8592;</button>
+        <button class="brand" data-act="home" title="여행 목록으로">Moïse <em>다음 여행지</em></button>
+      </div>
       <div class="who" id="who"></div>
     </div>
     <ul class="steps" id="steps"></ul>
