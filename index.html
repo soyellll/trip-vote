@@ -121,6 +121,12 @@ p.lede{margin:0;color:var(--ink-2);font-size:14.5px}
 .btn.sm{min-height:40px;font-size:13.5px;padding:0 14px;font-weight:600;border-width:1.5px}
 .btn.block{width:100%}
 .btn[disabled]{opacity:.35;pointer-events:none}
+.btn.is-loading,.res.is-loading{opacity:.55;pointer-events:none;position:relative}
+.btn.is-loading::after{content:"";width:14px;height:14px;margin-left:8px;border-radius:50%;
+  border:2px solid currentColor;border-top-color:transparent;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+body.busy{cursor:progress}
+body.busy [data-act]{pointer-events:none}
 .btn-row{display:flex;gap:8px;flex-wrap:wrap}
 
 .field{width:100%;background:var(--card);border:2px solid var(--ink);border-radius:4px;
@@ -275,8 +281,20 @@ textarea.field{resize:vertical;line-height:1.6;min-height:92px}
 .dock-in{max-width:520px;margin:0 auto;display:flex;flex-direction:column;gap:6px}
 .dock .hint{font-size:12px;color:var(--ink-3);text-align:center}
 .foot{padding:20px 16px 6px;text-align:center}
-.foot button{background:none;border:0;color:var(--ink-3);font-size:12px;
-  text-decoration:underline;text-underline-offset:3px;padding:6px}
+.menubtn{background:var(--card);border:1.5px solid var(--line);border-radius:999px;
+  color:var(--ink-2);font-size:13px;font-weight:600;padding:9px 18px;min-height:40px}
+.menu-row{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;
+  background:var(--card);border:1.5px solid var(--line);border-radius:10px;padding:13px 15px;
+  text-align:left;font:inherit;color:inherit}
+.menu-row .l{font-weight:700;font-size:15px}
+.menu-row .s{font-size:12px;color:var(--ink-3)}
+.menu-danger{margin-top:14px;padding-top:12px;border-top:2px dashed var(--line);
+  display:flex;flex-direction:column;gap:8px}
+.menu-danger .menu-row{border-color:var(--accent);border-width:2px}
+.todo{background:var(--card);border:2px solid var(--ink);border-radius:6px;padding:12px 14px;
+  display:flex;flex-direction:column;gap:8px}
+.todo-row{display:flex;align-items:center;gap:10px;justify-content:space-between;font-size:13.5px}
+.todo-row span{flex:1;line-height:1.45}
 
 .scrim{position:fixed;inset:0;z-index:60;background:rgba(10,10,9,.6);
   display:flex;align-items:flex-end;justify-content:center;animation:fade .16s ease}

@@ -603,9 +603,10 @@ function draftBlocked() {
   var bad = [];
   draft.picks.forEach(function (id) {
     var raw = (draft.raw[id] || "").trim();
-    if (!raw) return;
+    var done = draft.status[id] === "ready" || draft.status[id] === "raw";
+    if (!raw && !done) { bad.push(id); return; }      // 코멘트는 필수
     if (chars(raw) > COMMENT_MAX) { bad.push(id); return; }
-    if (draft.status[id] !== "ready" && draft.status[id] !== "raw") bad.push(id);
+    if (!done) bad.push(id);
   });
   return bad;
 }
@@ -1496,6 +1497,33 @@ function searchResultsHTML() {
 }
 
 /* 방 안에서 지운 여행지와 표를 되돌립니다. */
+/* 아직 안 채운 것들. 지금 화면에서 바로 알려 줍니다. */
+function todoList() {
+  var out = [], v = myVoter(), m = M();
+  if (v && !voterDates(v).length) out.push({ t: "가능한 날짜를 아직 안 골랐어요.", act: "editdates", b: "고르기" });
+  if (v && !voterVac(v)) out.push({ t: "휴가를 며칠 쓸 수 있는지 안 적었어요.", act: "editdates", b: "적기" });
+  var noTag = S.places.filter(function (p) { return !placeTags(p).length; });
+  if (noTag.length && m.phase === "lobby") {
+    out.push({ t: "태그가 없는 여행지 " + noTag.length + "곳 (" + noTag.slice(0, 3).map(function (p) { return p.name; }).join(", ") +
+      (noTag.length > 3 ? " 외" : "") + ")", act: null });
+  }
+  if ((m.phase === "vote" || canStillVote()) && draft && draft.picks.length) {
+    var miss = draftBlocked().length;
+    if (miss) out.push({ t: "고른 곳 중 " + miss + "곳에 이유를 아직 안 적었어요.", act: null });
+  }
+  return out;
+}
+
+function todoHTML() {
+  var list = todoList();
+  if (!list.length) return "";
+  return '<div class="todo"><div class="eyebrow">아직 안 한 것</div>' +
+    list.map(function (x) {
+      return '<div class="todo-row"><span>' + esc(x.t) + "</span>" +
+        (x.act ? '<button class="btn sm" data-act="' + x.act + '">' + esc(x.b) + "</button>" : "") + "</div>";
+    }).join("") + "</div>";
+}
+
 function trashPanel() {
   if (!trashPlaces.length && !trashBallots) return "";
   var body = "";
@@ -1534,7 +1562,7 @@ function viewLobby() {
       "</div></div>";
   }).join("");
 
-  return toastHTML() +
+  return toastHTML() + todoHTML() +
     '<div class="stack"><div><div class="eyebrow">Step 02 · Destinations</div><h1 class="title">어디로 갈까</h1></div>' +
     '<p class="lede">나라나 도시를 검색해 추가하세요. 비행시간·항공권은 <b>인천 출발 기준 대략치</b>입니다.</p></div>' +
     shareCard() +
@@ -1589,14 +1617,14 @@ function viewVote() {
       tagsLine(p) + (picked ? composer(id) : "") + "</div>";
   }).join("");
 
-  return toastHTML() +
+  return toastHTML() + todoHTML() +
     (m.phase === "result"
       ? '<div class="banner"><span class="mk">늦참 환영</span><span>결과가 이미 열렸지만 <b>아직 투표할 수 있어요.</b> 내 표가 들어가면 결과도 같이 바뀝니다.</span></div>'
       : "") +
     '<div class="stack"><div><div class="eyebrow">' +
     (m.round === 1 ? "Step 03 · 1차 투표" : "Step 04 · 결선 " + (m.round - 1) + "차") + "</div>" +
     '<h1 class="title">' + (m.round === 1 ? (NUM_KO[VOTES_R1] || VOTES_R1) + " 곳을 고르세요" : "한 곳만 고르세요") + "</h1></div>" +
-    '<p class="lede">지금 <b>' + d.picks.length + " / " + max + "표</b> 썼어요. 고른 곳마다 이유를 남길 수 있고, 남긴 이유는 <b>번역기 말투로 바꾼 뒤에만</b> 제출돼요.</p></div>" +
+    '<p class="lede">지금 <b>' + d.picks.length + " / " + max + "표</b> 썼어요. 고른 곳마다 이유를 적고 <b>번역기 말투로 바꿔야</b> 제출됩니다.</p></div>" +
     '<div class="stack" style="gap:16px">' + cards + "</div>" + progress;
 }
 
@@ -1608,7 +1636,7 @@ function composer(id) {
   var tag = st === "ready" ? '<span class="tag ok" id="tag-' + id + '">변환 완료</span>'
     : st === "raw" ? '<span class="tag warn" id="tag-' + id + '">원문 그대로</span>'
     : raw.trim() ? '<span class="tag warn" id="tag-' + id + '">변환 필요</span>'
-    : '<span class="tag" id="tag-' + id + '">선택 사항</span>';
+    : '<span class="tag warn" id="tag-' + id + '">필수</span>';
 
   var body, editor;
   if (st === "ready" || st === "raw") {
@@ -1898,20 +1926,28 @@ function renderDock() {
       var blocked = draft ? draftBlocked() : [];
       inner = '<button class="btn red block" data-act="review"' + (canSubmit() ? "" : " disabled") + ">확인하고 투표하기</button>";
       hint = !draft || draft.picks.length === 0 ? "최소 한 곳은 골라 주세요."
-        : blocked.length ? "코멘트를 쓴 곳은 " + COMMENT_MAX + "자 이내로 줄이고 말투 변환까지 마쳐야 해요."
+        : blocked.length ? "고른 곳마다 이유를 " + COMMENT_MAX + "자 이내로 적고 말투 변환까지 마쳐 주세요."
         : draft.picks.length + "곳 선택함";
     }
   } else if (canStillVote()) {
     var blocked2 = draft ? draftBlocked() : [];
     inner = '<button class="btn red block" data-act="review"' + (canSubmit() ? "" : " disabled") + ">확인하고 투표하기</button>";
     hint = !draft || draft.picks.length === 0 ? "최소 한 곳은 골라 주세요."
-      : blocked2.length ? "코멘트를 쓴 곳은 " + COMMENT_MAX + "자 이내로 줄이고 말투 변환까지 마쳐야 해요."
+      : blocked2.length ? "고른 곳마다 이유를 " + COMMENT_MAX + "자 이내로 적고 말투 변환까지 마쳐 주세요."
       : draft.picks.length + "곳 선택함";
   } else if (m.phase === "result") {
     var o = outcome(m.round);
-    if (o.kind === "win") inner = '<button class="btn red block" data-act="confirmwin" data-id="' + o.winner + '">여기로 확정하기</button>';
-    else if (o.kind === "empty") inner = '<button class="btn block" data-act="backvote">투표로 돌아가기</button>';
-    else inner = '<button class="btn primary block" data-act="gochoose" data-ids="' + o.finalists.join(",") + '">결선 방식 고르기</button>';
+    var left = S.voters.length - votedCount(m.round);
+    var waiting = S.voters.length === 0 || left > 0;
+    var pend = S.voters.filter(function (v) { return !hasVoted(v, m.round); }).map(function (v) { return v.name; });
+    if (o.kind === "empty") inner = '<button class="btn block" data-act="backvote">투표로 돌아가기</button>';
+    else if (o.kind === "win") {
+      inner = '<button class="btn red block" data-act="confirmwin" data-id="' + o.winner + '"' + (waiting ? " disabled" : "") + ">여기로 확정하기</button>";
+      hint = waiting ? pend.join(", ") + " 님이 아직 투표 전이에요." : "";
+    } else {
+      inner = '<button class="btn primary block" data-act="gochoose" data-ids="' + o.finalists.join(",") + '"' + (waiting ? " disabled" : "") + ">결선 방식 고르기</button>";
+      hint = waiting ? pend.join(", ") + " 님이 아직 투표 전이에요. 다 하면 열립니다." : "";
+    }
   } else if (m.phase === "wheel") {
     var revealed = !!(m.spin && spinSeen[m.spin.id] === "done");
     if (revealed) inner = '<button class="btn red block" data-act="confirmwin" data-id="' + m.winner + '">여기로 확정하기</button>';
@@ -1925,15 +1961,29 @@ function renderDock() {
   return '<div class="dock"><div class="dock-in">' + inner + (hint ? '<div class="hint">' + esc(hint) + "</div>" : "") + "</div></div>";
 }
 
+/* 예전에는 작은 밑줄 링크 네 개가 나란히 있어서 오탭하기 쉬웠습니다.
+   이제 하나의 메뉴 버튼으로 모으고, 위험한 항목은 시트 맨 아래에 따로 둡니다. */
 function renderFoot() {
   if (mode === "connecting" || needsRoom() || needsJoin() || editingDates) return "";
-  var m = M(), bits = [];
-  if (myVoter()) bits.push('<button data-act="editdates">내 날짜 수정</button>');
-  bits.push('<button data-act="switchperson">다른 사람으로</button>');
-  if (mode === "local" && m.phase === "vote") bits.push('<button data-act="next">다음 사람에게 넘기기</button>');
-  if (mode === "shared" && m.phase !== "lobby") bits.push('<button data-act="copylink">링크 복사</button>');
-  bits.push('<button data-act="askclear">모든 참가자 표 초기화</button>');
-  return bits.join(" · ");
+  return '<button class="menubtn" data-act="openmenu">⋯ 메뉴</button>';
+}
+
+function menuSheet() {
+  var m = M(), rows = "";
+  function row(act, label, sub) {
+    return '<button class="menu-row" data-act="' + act + '"><span class="l">' + label + "</span>" +
+      (sub ? '<span class="s">' + sub + "</span>" : "") + "</button>";
+  }
+  if (myVoter()) rows += row("editdates", "내 날짜·휴가 수정", "가능한 날짜와 휴가 일수");
+  rows += row("switchperson", "다른 사람으로", "이름을 다시 고릅니다");
+  if (mode === "shared") rows += row("copylink", "링크 복사", "단톡방에 뿌리기");
+  if (mode === "local" && m.phase === "vote") rows += row("next", "다음 사람에게 넘기기", "");
+
+  return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+    '<div class="stack-sm"><div class="eyebrow">메뉴</div>' + rows +
+    '<div class="menu-danger"><div class="eyebrow">되돌리기 어려운 작업</div>' +
+    row("askclear", "모든 참가자 표 초기화", "삭제 코드가 필요합니다") + "</div>" +
+    '<button class="btn ghost block" data-act="closemodal">닫기</button></div></div></div>';
 }
 
 function renderModal() {
@@ -1942,8 +1992,7 @@ function renderModal() {
     var rows = draft.picks.map(function (id) {
       var c = commentFor(id);
       return '<div class="stack-sm"><h2 class="sub">' + esc(placeName(id)) + "</h2>" +
-        (c ? '<div class="cmt"><span class="anon">제출될 코멘트</span>' + esc(c) + "</div>"
-           : '<p class="muted">코멘트 없이 표만 갑니다.</p>') + "</div>";
+        '<div class="cmt"><span class="anon">제출될 코멘트</span>' + esc(c) + "</div></div>";
     }).join("");
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">마지막 확인</div>' +
@@ -1964,6 +2013,7 @@ function renderModal() {
       '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doedit">확인하고 고치기</button>' +
       '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
   }
+  if (modalView === "menu") return menuSheet();
   if (modalView === "emptytrash") {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">휴지통 비우기</div>' +
@@ -2057,7 +2107,7 @@ document.addEventListener("input", function (e) {
     if (btn) { if (filled && !over) btn.removeAttribute("disabled"); else btn.setAttribute("disabled", ""); }
   });
   var tg = document.getElementById("tag-" + id);
-  if (tg) { tg.className = "tag" + (filled ? " warn" : ""); tg.textContent = filled ? "변환 필요" : "선택 사항"; }
+  if (tg) { tg.className = "tag warn"; tg.textContent = filled ? "변환 필요" : "필수"; }
   var cnt = document.getElementById("cnt-" + id);
   if (cnt) { cnt.className = "counter" + (over ? " over" : ""); cnt.textContent = len + " / " + COMMENT_MAX; }
   $("#dock").innerHTML = renderDock();
@@ -2078,89 +2128,111 @@ document.addEventListener("keydown", function (e) {
   if (t.dataset.titleinput) { e.preventDefault(); saveTitle(); }
 });
 
+/* 클릭 한 번에 한 동작만. 네트워크를 기다리는 동안 다시 눌러도 무시하고,
+   누른 버튼은 눌린 티가 나게 잠급니다. */
+var busy = false;
+
+function dispatch(act, el, id) {
+  if (act === "home") return goHome();
+  if (act === "back") return goBack();
+  if (act === "doopenresult") return openResult();
+  if (act === "askedit") { modalView = "editballot"; render(); return; }
+  if (act === "doedit") return editMyBallot();
+  if (act === "leavehome") { draft = null; modalView = null; return goHome(); }
+  if (act === "createroom") return createRoom(newRoomTitle, newRoomYear);
+  if (act === "setyear") { newRoomYear = Number(el.dataset.y); render(); return; }
+  if (act === "enterroom") return joinRoomByCode(el.dataset.code);
+  if (act === "askdelroom") {
+    guardAction = { kind: "delroom", code: el.dataset.code,
+      title: "“" + (el.dataset.t || "이 여행") + "” 을 지울까요?",
+      desc: "여행지, 표, 코멘트, 참가자 날짜가 전부 사라집니다." };
+    codeDraft = ""; modalView = "guard"; render(); return;
+  }
+  if (act === "copylink") return copyLink();
+  if (act === "join") { var j = document.querySelector('[data-keep="joinname"]'); return joinAsName(j ? j.value : ""); }
+  if (act === "editdates") { editingDates = true; startDatePick(); render(); return; }
+  if (act === "savedates") return saveDatesOnly();
+  if (act === "adddest") {
+    var d = DEST.filter(function (x) { return x.c === el.dataset.c; })[0];
+    return d ? addDestination(d) : undefined;
+  }
+  if (act === "addcustom") return addCustomPlace();
+  if (act === "identify") { var nf = document.querySelector('[data-keep="idname"]'); identifyAs(nf ? nf.value : ""); return; }
+  if (act === "iam") { identifyAs(el.dataset.n); return; }
+  if (act === "switchperson") { switchPerson(); return; }
+  if (act === "toggleheat") { showHeat = !showHeat; render(); return; }
+  if (act === "toggleplaces") { showPlaces = !showPlaces; render(); return; }
+  if (act === "gostep") { goStep(el.dataset.n); return; }
+  if (act === "golive") { viewStep = null; editingDates = false; dateSel = null; render(); return; }
+  if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; newRoomCode4 = ""; render(); return; }
+  if (act === "savetitle") return saveTitle();
+  if (act === "canceltitle") { titleEdit = false; titleDraft = ""; newRoomCode4 = ""; render(); return; }
+  if (act === "opentags") { openTags(id); return; }
+  if (act === "savetags") return saveTags();
+  if (act === "canceltags") { tagEditId = null; tagDraft = []; tagText = ""; render(); return; }
+  if (act === "rmtag") { tagDraft.splice(Number(el.dataset.i), 1); render(); return; }
+  if (act === "sugtag") { addTagFromInput(el.dataset.t); render(); return; }
+  if (act === "delplace") return store.delPlace(id);
+  if (act === "startvote") return startVote();
+  if (act === "pick") { togglePick(id); return; }
+  if (act === "convert") { convert(id); return; }
+  if (act === "useraw") { ensureDraft(); draft.status[id] = "raw"; render(); return; }
+  if (act === "unlock") { ensureDraft(); draft.status[id] = "idle"; draft.err[id] = ""; render(); return; }
+  if (act === "review") { if (canSubmit()) { modalView = "confirm"; render(); } return; }
+  if (act === "submit") return submitBallot();
+  if (act === "closemodal") { modalView = null; guardAction = null; codeDraft = ""; editName = ""; render(); return; }
+  if (act === "openresult") return openResult();
+  if (act === "backvote") return store.setMeta({ phase: "vote" });
+  if (act === "confirmwin") return confirmWin(id);
+  if (act === "gochoose") return goChoose((el.dataset.ids || "").split(",").filter(Boolean));
+  if (act === "revote") return pickRevote();
+  if (act === "wheel") return pickWheel();
+  if (act === "spin") return doSpin();
+  if (act === "askclear") {
+    guardAction = { kind: "clearvotes", title: "모든 참가자 표를 지울까요?",
+      desc: "이번 라운드에 낸 표와 코멘트가 전부 사라지고 모두 처음부터 다시 투표합니다. 여행지·참가자·날짜는 그대로 남습니다." };
+    codeDraft = ""; modalView = "guard"; render(); return;
+  }
+  if (act === "doguard") return runGuarded();
+  if (act === "toggletrash") { showTrash = !showTrash; render(); return; }
+  if (act === "restoreroom") return restoreRoom(el.dataset.code);
+  if (act === "restoreplace") return store.undelPlace(id);
+  if (act === "restoreballots") return restoreBallots();
+  if (act === "purgeplace") return store.purgePlace(id);
+  if (act === "askempty") { modalView = "emptytrash"; render(); return; }
+  if (act === "doempty") return emptyTrash();
+  if (act === "askpurge") {
+    guardAction = { kind: "purgeroom", code: el.dataset.code,
+      title: "“" + (el.dataset.t || "이 여행") + "” 을 영구히 지울까요?",
+      desc: "휴지통에서도 사라져 다시는 되돌릴 수 없습니다." };
+    codeDraft = ""; modalView = "guard"; render(); return;
+  }
+  if (act === "openmenu") { modalView = "menu"; render(); return; }
+  if (act === "next") { nextPerson(); return; }
+}
+
 document.addEventListener("click", function (e) {
   var el = e.target.closest ? e.target.closest("[data-act]") : null;
   if (!el) return;
   if (el.classList.contains("scrim") && e.target !== el) return;
-  var act = el.dataset.act, id = el.dataset.id;
+  if (busy) return;   // 처리 중이면 두 번째 클릭은 무시
 
-  if (act === "home") goHome();
-  else if (act === "back") goBack();
-  else if (act === "doopenresult") openResult();
-  else if (act === "askedit") { modalView = "editballot"; render(); }
-  else if (act === "doedit") editMyBallot();
-  else if (act === "leavehome") { draft = null; modalView = null; goHome(); }
-  else if (act === "createroom") {
-    createRoom(newRoomTitle, newRoomYear);
+  var p;
+  try { p = dispatch(el.dataset.act, el, el.dataset.id); }
+  catch (err) { busy = false; throw err; }
+
+  if (p && typeof p.then === "function") {
+    busy = true;
+    el.classList.add("is-loading");
+    el.setAttribute("aria-busy", "true");
+    document.body.classList.add("busy");
+    var done = function () {
+      busy = false;
+      document.body.classList.remove("busy");
+      render();
+    };
+    p.then(done, function (err) { done(); console.error(err); });
   }
-  else if (act === "setyear") { newRoomYear = Number(el.dataset.y); render(); }
-  else if (act === "enterroom") joinRoomByCode(el.dataset.code);
-  else if (act === "askdelroom") {
-    guardAction = { kind: "delroom", code: el.dataset.code,
-      title: "“" + (el.dataset.t || "이 여행") + "” 을 지울까요?",
-      desc: "여행지, 표, 코멘트, 참가자 날짜가 전부 사라집니다." };
-    codeDraft = ""; modalView = "guard"; render();
-  }
-  else if (act === "copylink") copyLink();
-  else if (act === "join") { var j = document.querySelector('[data-keep="joinname"]'); joinAsName(j ? j.value : ""); }
-  else if (act === "editdates") { editingDates = true; startDatePick(); render(); }
-  else if (act === "savedates") saveDatesOnly();
-  else if (act === "adddest") {
-    var d = DEST.filter(function (x) { return x.c === el.dataset.c; })[0];
-    if (d) addDestination(d);
-  }
-  else if (act === "addcustom") addCustomPlace();
-  else if (act === "identify") { var nf = document.querySelector('[data-keep="idname"]'); identifyAs(nf ? nf.value : ""); }
-  else if (act === "iam") identifyAs(el.dataset.n);
-  else if (act === "switchperson") switchPerson();
-  else if (act === "toggleheat") { showHeat = !showHeat; render(); }
-  else if (act === "toggleplaces") { showPlaces = !showPlaces; render(); }
-  else if (act === "gostep") goStep(el.dataset.n);
-  else if (act === "golive") { viewStep = null; editingDates = false; dateSel = null; render(); }
-  else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; newRoomCode4 = ""; render(); }
-  else if (act === "savetitle") saveTitle();
-  else if (act === "canceltitle") { titleEdit = false; titleDraft = ""; newRoomCode4 = ""; render(); }
-  else if (act === "opentags") openTags(id);
-  else if (act === "savetags") saveTags();
-  else if (act === "canceltags") { tagEditId = null; tagDraft = []; tagText = ""; render(); }
-  else if (act === "rmtag") { tagDraft.splice(Number(el.dataset.i), 1); render(); }
-  else if (act === "sugtag") { addTagFromInput(el.dataset.t); render(); }
-  else if (act === "delplace") store.delPlace(id);
-  else if (act === "startvote") startVote();
-  else if (act === "pick") togglePick(id);
-  else if (act === "convert") convert(id);
-  else if (act === "useraw") { ensureDraft(); draft.status[id] = "raw"; render(); }
-  else if (act === "unlock") { ensureDraft(); draft.status[id] = "idle"; draft.err[id] = ""; render(); }
-  else if (act === "review") { if (canSubmit()) { modalView = "confirm"; render(); } }
-  else if (act === "submit") submitBallot();
-  else if (act === "closemodal") { modalView = null; guardAction = null; codeDraft = ""; editName = ""; render(); }
-  else if (act === "openresult") openResult();
-  else if (act === "backvote") store.setMeta({ phase: "vote" });
-  else if (act === "confirmwin") confirmWin(id);
-  else if (act === "gochoose") goChoose((el.dataset.ids || "").split(",").filter(Boolean));
-  else if (act === "revote") pickRevote();
-  else if (act === "wheel") pickWheel();
-  else if (act === "spin") doSpin();
-  else if (act === "askclear") {
-    guardAction = { kind: "clearvotes", title: "모든 참가자 표를 지울까요?",
-      desc: "이번 라운드에 낸 표와 코멘트가 전부 사라지고 모두 처음부터 다시 투표합니다. 여행지·참가자·날짜는 그대로 남습니다." };
-    codeDraft = ""; modalView = "guard"; render();
-  }
-  else if (act === "doguard") runGuarded();
-  else if (act === "toggletrash") { showTrash = !showTrash; render(); }
-  else if (act === "restoreroom") restoreRoom(el.dataset.code);
-  else if (act === "restoreplace") store.undelPlace(id);
-  else if (act === "restoreballots") restoreBallots();
-  else if (act === "purgeplace") store.purgePlace(id);
-  else if (act === "askempty") { modalView = "emptytrash"; render(); }
-  else if (act === "doempty") emptyTrash();
-  else if (act === "askpurge") {
-    guardAction = { kind: "purgeroom", code: el.dataset.code,
-      title: "“" + (el.dataset.t || "이 여행") + "” 을 영구히 지울까요?",
-      desc: "휴지통에서도 사라져 다시는 되돌릴 수 없습니다." };
-    codeDraft = ""; modalView = "guard"; render();
-  }
-  else if (act === "next") nextPerson();
 });
 
 window.addEventListener("hashchange", function () {
