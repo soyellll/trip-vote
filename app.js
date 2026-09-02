@@ -129,6 +129,10 @@ var newRoomCode4 = "";     // 새 방 만들 때 정하는 삭제 코드
 var newRoomTitle = "";     // 새 방 이름 입력값
 var guardAction = null;    // 삭제 코드를 물어보는 중인 위험 동작
 var editName = "";         // 표 수정 전에 확인용으로 입력하는 이름
+var trashRooms = [];       // 지운 여행 (되돌릴 수 있음)
+var trashPlaces = [];      // 지운 여행지
+var trashBallots = 0;      // 지운 표 수 (이번 라운드)
+var showTrash = false;     // 휴지통 펼침
 var titleDraft = "";       // 바꾸는 중인 이름
 
 var TAG_SUGGEST = ["맛집", "가성비", "휴양", "물놀이", "쇼핑", "야경", "자연", "도시",
@@ -224,7 +228,10 @@ async function fetchRoom() {
 }
 async function fetchPlaces() {
   var r = await sb.from("places").select("*").eq("room_id", roomId).order("sort", { ascending: true });
-  S.places = r.data || []; schedule();
+  var all = r.data || [];
+  S.places = all.filter(function (p) { return !p.deleted_at; });
+  trashPlaces = all.filter(function (p) { return !!p.deleted_at; });
+  schedule();
 }
 async function fetchVoters() {
   var r = await sb.from("voters").select("*").eq("room_id", roomId).order("joined_at", { ascending: true });
@@ -235,7 +242,11 @@ async function fetchVoters() {
 }
 async function fetchBallots() {
   var r = await sb.from("ballots").select("*").eq("room_id", roomId).order("id", { ascending: true });
-  S.ballots = r.data || []; schedule();
+  var all = r.data || [];
+  S.ballots = all.filter(function (b) { return !b.deleted_at; });
+  var rd = M().round;
+  trashBallots = all.filter(function (b) { return b.deleted_at && b.round === rd; }).length;
+  schedule();
 }
 
 var store = {
@@ -268,8 +279,24 @@ var store = {
     }
   },
   delPlace: async function (id) {
-    if (mode === "shared") { await sb.from("places").delete().eq("id", id); await fetchPlaces(); }
-    else { S.places = S.places.filter(function (p) { return p.id !== id; }); localSave(); schedule(); }
+    if (mode === "shared") {
+      await sb.from("places").update({ deleted_at: new Date().toISOString() }).eq("id", id);
+      await fetchPlaces();
+    } else {
+      var p = S.places.filter(function (x) { return x.id === id; })[0];
+      if (p) trashPlaces.push(p);
+      S.places = S.places.filter(function (x) { return x.id !== id; }); localSave(); schedule();
+    }
+  },
+  undelPlace: async function (id) {
+    if (mode === "shared") {
+      await sb.from("places").update({ deleted_at: null }).eq("id", id);
+      await fetchPlaces();
+    } else {
+      var p = trashPlaces.filter(function (x) { return x.id === id; })[0];
+      if (p) S.places.push(p);
+      trashPlaces = trashPlaces.filter(function (x) { return x.id !== id; }); localSave(); schedule();
+    }
   },
   setVoter: async function (v) {
     if (mode === "shared") {
@@ -361,9 +388,11 @@ async function attachRoom(code, id) {
 /* 방 목록. code 는 RLS 게이트용으로만 남아 있고 화면에는 나오지 않습니다. */
 async function fetchRooms() {
   if (mode !== "shared") return;
-  var r = await authClient.from("rooms").select("id,code,title,year,created_at,delete_code")
+  var r = await authClient.from("rooms").select("id,code,title,year,created_at,delete_code,deleted_at")
     .order("created_at", { ascending: false });
-  roomList = r.data || [];
+  var all = r.data || [];
+  roomList = all.filter(function (x) { return !x.deleted_at; });
+  trashRooms = all.filter(function (x) { return !!x.deleted_at; });
   schedule();
 }
 
@@ -392,8 +421,9 @@ async function runGuarded() {
   if (!guardAction) return;
   var a = guardAction;
   var expected;
-  if (a.kind === "delroom") {
-    var row = roomList.filter(function (r) { return r.code === a.code; })[0];
+  if (a.kind === "delroom" || a.kind === "purgeroom") {
+    // 지운 방은 휴지통 목록에 있습니다
+    var row = roomList.concat(trashRooms).filter(function (r) { return r.code === a.code; })[0];
     expected = row ? row.delete_code : "";
   } else {
     expected = M().delete_code || "";
@@ -403,7 +433,8 @@ async function runGuarded() {
   if (st === "bad") { say("삭제 코드가 맞지 않아요."); return; }
   guardAction = null; codeDraft = ""; modalView = null;
   if (a.kind === "delroom") await deleteRoom(a.code);
-  else if (a.kind === "clearvotes") { await clearRound(M().round); say("이번 라운드 표를 모두 지웠어요."); }
+  else if (a.kind === "purgeroom") await purgeRoom(a.code);
+  else if (a.kind === "clearvotes") { await clearRound(M().round); await fetchBallots(); say("표를 휴지통으로 옮겼어요. 되돌릴 수 있습니다."); }
   render();
 }
 
@@ -411,10 +442,31 @@ async function deleteRoom(code) {
   if (!code) return;
   var client = baseClient({ "x-room-code": code });
   await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
-  var r = await client.from("rooms").delete().eq("code", code);
+  var r = await client.from("rooms").update({ deleted_at: new Date().toISOString() }).eq("code", code);
   delTarget = null;
   if (r.error) { say(writeError(r.error)); return; }
   await fetchRooms();
+  say("휴지통으로 옮겼어요. 되돌릴 수 있습니다.");
+  render();
+}
+
+async function restoreRoom(code) {
+  var client = baseClient({ "x-room-code": code });
+  await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
+  var r = await client.from("rooms").update({ deleted_at: null }).eq("code", code);
+  if (r.error) { say(writeError(r.error)); return; }
+  await fetchRooms();
+  say("되돌렸어요.");
+  render();
+}
+
+async function purgeRoom(code) {
+  var client = baseClient({ "x-room-code": code });
+  await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
+  var r = await client.from("rooms").delete().eq("code", code);
+  if (r.error) { say(writeError(r.error)); return; }
+  await fetchRooms();
+  say("영구히 지웠어요.");
   render();
 }
 
@@ -704,8 +756,9 @@ async function goBack() {
 /** 한 라운드의 표와 '투표함' 표시를 지웁니다. 참가자·날짜·여행지는 그대로. */
 async function clearRound(round) {
   if (mode === "shared") {
-    var ids = S.ballots.filter(function (b) { return b.round === round; }).map(function (b) { return b.id; });
-    for (var i = 0; i < ids.length; i++) await sb.from("ballots").delete().eq("id", ids[i]);
+    var now = new Date().toISOString();
+    await sb.from("ballots").update({ deleted_at: now })
+      .eq("room_id", roomId).eq("round", round).is("deleted_at", null);
   } else {
     S.ballots = S.ballots.filter(function (b) { return b.round !== round; });
   }
@@ -754,6 +807,33 @@ async function editMyBallot() {
   });
   modalView = null;
   say("표를 되돌렸어요. 고쳐서 다시 제출해 주세요.");
+  render();
+}
+
+/* 초기화한 표를 되살립니다. 표시만 지워 뒀으므로 그대로 돌아옵니다. */
+async function restoreBallots() {
+  var round = M().round;
+  if (mode !== "shared") { say("이 모드에서는 되돌릴 수 없어요."); return; }
+  var r = await sb.from("ballots").select("id,client_id")
+    .eq("room_id", roomId).eq("round", round).not("deleted_at", "is", null);
+  var rows = r.data || [];
+  if (!rows.length) { say("되돌릴 표가 없어요."); return; }
+  await sb.from("ballots").update({ deleted_at: null })
+    .eq("room_id", roomId).eq("round", round).not("deleted_at", "is", null);
+  // 투표함 표시도 되살립니다
+  for (var i = 0; i < rows.length; i++) {
+    var owner = rows[i].client_id;
+    if (!owner) continue;
+    var v = S.voters.filter(function (x) { return x.client_id === owner; })[0];
+    if (!v || hasVoted(v, round)) continue;
+    var rounds = Object.assign({}, v.rounds || {}); rounds["r" + round] = true;
+    await sb.from("voters").upsert(
+      { room_id: roomId, client_id: v.client_id, name: v.name, rounds: rounds,
+        dates: voterDates(v), vacation_days: voterVac(v) },
+      { onConflict: "room_id,client_id" });
+  }
+  await fetchVoters(); await fetchBallots();
+  say(rows.length + "장을 되돌렸어요.");
   render();
 }
 
@@ -1272,6 +1352,19 @@ function viewRoomEntry() {
     (roomList.length
       ? '<div class="stack-sm"><div class="eyebrow">진행 중인 여행</div><div class="results" style="border-radius:6px;border-top:2px solid var(--ink)">' + list + "</div></div>"
       : '<p class="muted" style="text-align:center;padding:6px 0">아직 만들어진 여행이 없어요.</p>') +
+    (trashRooms.length
+      ? '<div class="stack-sm"><button class="btn ghost block" data-act="toggletrash">' +
+        (showTrash ? "휴지통 접기 ▲" : "휴지통 " + trashRooms.length + "개 ▼") + "</button>" +
+        (showTrash
+          ? '<div class="results" style="border-radius:6px;border-top:1.5px solid var(--line)">' +
+            trashRooms.map(function (r) {
+              return '<div class="res" style="padding:0">' +
+                '<span class="nm" style="padding:11px 13px;flex:1">' + esc(r.title || "여행") + "</span>" +
+                '<button class="btn sm" style="margin-right:6px" data-act="restoreroom" data-code="' + esc(r.code) + '">되돌리기</button>' +
+                '<button class="btn sm ghost" style="margin-right:10px" data-act="askpurge" data-code="' + esc(r.code) + '" data-t="' + esc(r.title || "") + '">영구 삭제</button></div>';
+            }).join("") + "</div>"
+          : "") + "</div>"
+      : "") +
     '<div class="panel stack-sm"><div class="eyebrow">새로 만들기</div>' +
     '<div class="btn-row">' + years + "</div>" +
     '<input class="field" data-keep="roomtitle" data-newtitle="1" maxlength="24" placeholder="' +
@@ -1378,6 +1471,28 @@ function searchResultsHTML() {
     '<span class="rg">정보 없음</span></button></div>';
 }
 
+/* 방 안에서 지운 여행지와 표를 되돌립니다. */
+function trashPanel() {
+  if (!trashPlaces.length && !trashBallots) return "";
+  var body = "";
+  if (trashBallots) {
+    body += '<div class="banner"><span class="mk">표</span>' +
+      '<span style="flex:1">초기화한 표 <b>' + trashBallots + "장</b>이 휴지통에 있어요.</span>" +
+      '<button class="btn sm" data-act="restoreballots">되돌리기</button></div>';
+  }
+  if (trashPlaces.length) {
+    body += '<div class="results" style="border-radius:6px;border-top:1.5px solid var(--line)">' +
+      trashPlaces.map(function (p) {
+        return '<div class="res" style="padding:0">' +
+          '<span class="nm" style="padding:11px 13px;flex:1">' + esc(p.name) + "</span>" +
+          '<button class="btn sm" style="margin-right:10px" data-act="restoreplace" data-id="' + p.id + '">되돌리기</button></div>';
+      }).join("") + "</div>";
+  }
+  return '<div class="stack-sm"><button class="btn ghost block" data-act="toggletrash">' +
+    (showTrash ? "휴지통 접기 ▲" : "휴지통 " + (trashPlaces.length + (trashBallots ? 1 : 0)) + "개 ▼") + "</button>" +
+    (showTrash ? body : "") + "</div>";
+}
+
 function viewLobby() {
   var withGeo = S.places.filter(function (p) { return p.lat != null; });
   var list = S.places.map(function (p) {
@@ -1402,6 +1517,7 @@ function viewLobby() {
     (withGeo.length ? mapHTML(withGeo) : "") +
     (S.places.length ? '<div class="stack">' + list + "</div>"
       : '<p class="muted" style="text-align:center;padding:14px 0">아직 올라온 곳이 없어요.</p>') +
+    trashPanel() +
     '<div class="stack-sm"><div class="eyebrow">참가자 ' + S.voters.length + "명</div>" +
     '<div class="chips">' + S.voters.map(function (v) {
       return '<span class="chip">' + esc(v.name) + '<span class="mk">' + voterDates(v).length + "일</span></span>";
@@ -1988,6 +2104,16 @@ document.addEventListener("click", function (e) {
     codeDraft = ""; modalView = "guard"; render();
   }
   else if (act === "doguard") runGuarded();
+  else if (act === "toggletrash") { showTrash = !showTrash; render(); }
+  else if (act === "restoreroom") restoreRoom(el.dataset.code);
+  else if (act === "restoreplace") store.undelPlace(id);
+  else if (act === "restoreballots") restoreBallots();
+  else if (act === "askpurge") {
+    guardAction = { kind: "purgeroom", code: el.dataset.code,
+      title: "“" + (el.dataset.t || "이 여행") + "” 을 영구히 지울까요?",
+      desc: "휴지통에서도 사라져 다시는 되돌릴 수 없습니다." };
+    codeDraft = ""; modalView = "guard"; render();
+  }
   else if (act === "next") nextPerson();
 });
 
