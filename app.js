@@ -171,9 +171,13 @@ function placeById(id) { for (var i = 0; i < S.places.length; i++) if (S.places[
 function placeName(id) { var p = placeById(id); return p ? p.name : "(삭제된 여행지)"; }
 function candidateIds() {
   var m = M();
-  if (m.phase === "lobby") return S.places.map(function (p) { return p.id; });
-  var c = m.candidates || [];
-  return c.length ? c.filter(function (id) { return !!placeById(id); }) : S.places.map(function (p) { return p.id; });
+  var all = S.places.map(function (p) { return p.id; });
+  if (m.phase === "lobby") return all;
+  var c = (m.candidates || []).filter(function (id) { return !!placeById(id); });
+  if (!c.length) return all;
+  // 1차는 여행지 전체가 후보입니다. 지워져서 2곳 미만이면 지금 목록으로 다시 잡습니다.
+  if (m.round === 1 && c.length < 2) return all;
+  return c;
 }
 function myVoter() { for (var i = 0; i < S.voters.length; i++) if (S.voters[i].client_id === me.id) return S.voters[i]; return null; }
 function hasVoted(v, round) { return !!(v && v.rounds && v.rounds["r" + round]); }
@@ -287,6 +291,10 @@ var store = {
       if (p) trashPlaces.push(p);
       S.places = S.places.filter(function (x) { return x.id !== id; }); localSave(); schedule();
     }
+  },
+  purgePlace: async function (id) {
+    if (mode === "shared") { await sb.from("places").delete().eq("id", id); await fetchPlaces(); }
+    else { trashPlaces = trashPlaces.filter(function (x) { return x.id !== id; }); localSave(); schedule(); }
   },
   undelPlace: async function (id) {
     if (mode === "shared") {
@@ -811,6 +819,22 @@ async function editMyBallot() {
 }
 
 /* 초기화한 표를 되살립니다. 표시만 지워 뒀으므로 그대로 돌아옵니다. */
+/* 휴지통을 완전히 비웁니다. 여기서만 실제로 DELETE 합니다. */
+async function emptyTrash() {
+  if (mode !== "shared") { trashPlaces = []; render(); return; }
+  var n = trashPlaces.length;
+  for (var i = 0; i < trashPlaces.length; i++) {
+    await sb.from("places").delete().eq("id", trashPlaces[i].id);
+  }
+  var r = await sb.from("ballots").delete()
+    .eq("room_id", roomId).not("deleted_at", "is", null).select("id");
+  var m = (r.data || []).length;
+  modalView = null;
+  await fetchPlaces(); await fetchBallots();
+  say("휴지통을 비웠어요. (여행지 " + n + "곳, 표 " + m + "장)");
+  render();
+}
+
 async function restoreBallots() {
   var round = M().round;
   if (mode !== "shared") { say("이 모드에서는 되돌릴 수 없어요."); return; }
@@ -1485,9 +1509,12 @@ function trashPanel() {
       trashPlaces.map(function (p) {
         return '<div class="res" style="padding:0">' +
           '<span class="nm" style="padding:11px 13px;flex:1">' + esc(p.name) + "</span>" +
-          '<button class="btn sm" style="margin-right:10px" data-act="restoreplace" data-id="' + p.id + '">되돌리기</button></div>';
+          '<button class="btn sm" style="margin-right:6px" data-act="restoreplace" data-id="' + p.id + '">되돌리기</button>' +
+          '<button class="btn sm ghost" style="margin-right:10px" data-act="purgeplace" data-id="' + p.id + '">삭제</button></div>';
       }).join("") + "</div>";
   }
+  body += '<button class="btn ghost block" data-act="askempty">휴지통 비우기</button>' +
+    '<p class="muted">비우면 되돌릴 수 없습니다.</p>';
   return '<div class="stack-sm"><button class="btn ghost block" data-act="toggletrash">' +
     (showTrash ? "휴지통 접기 ▲" : "휴지통 " + (trashPlaces.length + (trashBallots ? 1 : 0)) + "개 ▼") + "</button>" +
     (showTrash ? body : "") + "</div>";
@@ -1545,6 +1572,13 @@ function viewVote() {
           '<p class="muted">고른 곳과 코멘트를 바꿀 수 있어요. 다른 사람 표는 그대로예요.</p>'
         : '<p class="muted">이 라운드에 낸 표를 찾지 못했어요.</p>') +
       "</div>" + progress;
+  }
+
+  if (!cands.length) {
+    return toastHTML() +
+      '<div class="panel stack"><div class="eyebrow">' + (m.round === 1 ? "1차 투표" : "결선") + "</div>" +
+      '<h1 class="title">고를 여행지가 없어요</h1>' +
+      '<p class="lede">후보가 모두 지워졌습니다. 헤더의 <b>02 여행지</b> 에서 여행지를 추가한 뒤 다시 시작해 주세요.</p></div>';
   }
 
   var cards = cands.map(function (id) {
@@ -1930,6 +1964,15 @@ function renderModal() {
       '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doedit">확인하고 고치기</button>' +
       '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
   }
+  if (modalView === "emptytrash") {
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">휴지통 비우기</div>' +
+      '<h1 class="title" style="font-size:24px">완전히 지울까요?</h1></div>' +
+      '<p class="lede">휴지통의 여행지 <b>' + trashPlaces.length + "곳</b>과 지운 표 <b>" + trashBallots +
+      "장</b>이 사라집니다. 되돌릴 수 없습니다.</p>" +
+      '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--accent)" data-act="doempty">비우기</button>' +
+      '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
+  }
   if (modalView === "guard") {
     var g = guardAction || {};
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
@@ -2108,6 +2151,9 @@ document.addEventListener("click", function (e) {
   else if (act === "restoreroom") restoreRoom(el.dataset.code);
   else if (act === "restoreplace") store.undelPlace(id);
   else if (act === "restoreballots") restoreBallots();
+  else if (act === "purgeplace") store.purgePlace(id);
+  else if (act === "askempty") { modalView = "emptytrash"; render(); }
+  else if (act === "doempty") emptyTrash();
   else if (act === "askpurge") {
     guardAction = { kind: "purgeroom", code: el.dataset.code,
       title: "“" + (el.dataset.t || "이 여행") + "” 을 영구히 지울까요?",
