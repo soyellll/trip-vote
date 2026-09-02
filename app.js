@@ -161,7 +161,7 @@ function reachedStep() {
   S.ballots.forEach(function (x) { if (x.round === 1) hasR1 = true; else if (x.round > 1) hasLater = true; });
   var cap = 2;
   if (hasR1) cap = 3;
-  if (hasLater || (m.finalists || []).length) cap = 4;
+  if (hasLater || m.round > 1 || m.phase === "choose" || m.phase === "wheel") cap = 4;
   if (m.phase === "done" && m.winner) cap = 5;
   return Math.min(want, Math.max(cap, stepOfPhase(m)));
 }
@@ -172,12 +172,11 @@ function placeName(id) { var p = placeById(id); return p ? p.name : "(삭제된 
 function candidateIds() {
   var m = M();
   var all = S.places.map(function (p) { return p.id; });
-  if (m.phase === "lobby") return all;
+  // 1차는 언제나 지금 올라와 있는 여행지 전체입니다.
+  // 저장된 candidates 를 쓰면 예전 결선 후보가 남아 후보가 좁아집니다.
+  if (m.phase === "lobby" || m.round === 1) return all;
   var c = (m.candidates || []).filter(function (id) { return !!placeById(id); });
-  if (!c.length) return all;
-  // 1차는 여행지 전체가 후보입니다. 지워져서 2곳 미만이면 지금 목록으로 다시 잡습니다.
-  if (m.round === 1 && c.length < 2) return all;
-  return c;
+  return c.length ? c : all;
 }
 function myVoter() { for (var i = 0; i < S.voters.length; i++) if (S.voters[i].client_id === me.id) return S.voters[i]; return null; }
 function hasVoted(v, round) { return !!(v && v.rounds && v.rounds["r" + round]); }
@@ -757,6 +756,10 @@ async function goBack() {
   var patch = { phase: t.phase };
   if (t.phase !== "done") patch.winner = null;
   if (t.phase === "choose" || t.phase === "result") patch.spin = null;
+  // 1차로 돌아가면 결선 잔재를 정리합니다
+  if ((t.phase === "lobby" || t.phase === "vote" || t.phase === "result") && M().round === 1) {
+    patch.finalists = []; patch.tiebreak = null; patch.spin = null;
+  }
   await store.setMeta(patch);
   if (mode === "shared") await fetchBallots();
   render();
