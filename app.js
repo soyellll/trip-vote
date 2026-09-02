@@ -1502,9 +1502,12 @@ function todoList() {
   var out = [], v = myVoter(), m = M();
   if (v && !voterDates(v).length) out.push({ t: "가능한 날짜를 아직 안 골랐어요.", act: "editdates", b: "고르기" });
   if (v && !voterVac(v)) out.push({ t: "휴가를 며칠 쓸 수 있는지 안 적었어요.", act: "editdates", b: "적기" });
-  var noTag = S.places.filter(function (p) { return !placeTags(p).length; });
+  // 태그는 그 여행지를 올린 사람에게만 알려 줍니다. 남이 올린 곳까지 채우라고 할 일은 아니니까요.
+  var mine = S.places.filter(function (p) { return p.added_by && p.added_by === me.name; });
+  var noTag = mine.filter(function (p) { return !placeTags(p).length; });
   if (noTag.length && m.phase === "lobby") {
-    out.push({ t: "태그가 없는 여행지 " + noTag.length + "곳 (" + noTag.slice(0, 3).map(function (p) { return p.name; }).join(", ") +
+    out.push({ t: "내가 올린 여행지 중 태그가 없는 곳 " + noTag.length + "곳 (" +
+      noTag.slice(0, 3).map(function (p) { return p.name; }).join(", ") +
       (noTag.length > 3 ? " 외" : "") + ")", act: null });
   }
   if ((m.phase === "vote" || canStillVote()) && draft && draft.picks.length) {
