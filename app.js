@@ -124,6 +124,11 @@ var showHeat = false;      // 결과 화면의 달력 히트맵 펼침
 var showPlaces = false;    // 확정 화면의 여행지 정보 펼침
 var viewStep = null;       // 헤더 숫자로 지난 단계를 '보는 중' (방 단계는 그대로)
 var titleEdit = false;     // 여행 이름 바꾸는 중
+var codeDraft = "";        // 삭제 코드 입력값
+var newRoomCode4 = "";     // 새 방 만들 때 정하는 삭제 코드
+var newRoomTitle = "";     // 새 방 이름 입력값
+var guardAction = null;    // 삭제 코드를 물어보는 중인 위험 동작
+var editName = "";         // 표 수정 전에 확인용으로 입력하는 이름
 var titleDraft = "";       // 바꾸는 중인 이름
 
 var TAG_SUGGEST = ["맛집", "가성비", "휴양", "물놀이", "쇼핑", "야경", "자연", "도시",
@@ -145,7 +150,16 @@ function stepOfPhase(m) {
 }
 function reachedStep() {
   var m = M();
-  return Math.max(m.reached || 2, stepOfPhase(m));
+  var want = Math.max(m.reached || 2, stepOfPhase(m));
+  // 표가 지워졌는데 기록만 남아 있으면 빈 화면으로 보내게 됩니다.
+  // 실제 남아 있는 데이터로 상한을 다시 잡습니다.
+  var hasR1 = false, hasLater = false;
+  S.ballots.forEach(function (x) { if (x.round === 1) hasR1 = true; else if (x.round > 1) hasLater = true; });
+  var cap = 2;
+  if (hasR1) cap = 3;
+  if (hasLater || (m.finalists || []).length) cap = 4;
+  if (m.phase === "done" && m.winner) cap = 5;
+  return Math.min(want, Math.max(cap, stepOfPhase(m)));
 }
 function liveStep() { return stepOfPhase(M()); }
 function votesFor(round) { return round === 1 ? VOTES_R1 : 1; }
@@ -290,18 +304,6 @@ var store = {
     } else {
       S.ballots = S.ballots.filter(function (b) { return b.id !== id; }); localSave();
     }
-  },
-  resetAll: async function () {
-    if (mode === "shared") {
-      await sb.from("ballots").delete().eq("room_id", roomId);
-      await sb.from("voters").delete().eq("room_id", roomId);
-      await sb.from("places").delete().eq("room_id", roomId);
-      await sb.from("rooms").update({ phase: "lobby", round: 1, candidates: [], finalists: [], tiebreak: null, winner: null, spin: null }).eq("id", roomId);
-      S.ballots = []; await fetchPlaces(); await fetchVoters(); await fetchRoom();
-    } else {
-      S = { meta: Object.assign({}, DEFAULT_META), places: [], voters: [], ballots: [] };
-      localSave(); schedule();
-    }
   }
 };
 
@@ -346,7 +348,7 @@ async function goHome() {
 
 async function attachRoom(code, id) {
   roomCode = code; roomId = id; votersLoaded = false;
-  identified = !!(me.id && LS.get("tv_who_" + code) === me.id);
+  identified = false;   // 같은 방이라도 들어올 때마다 이름부터 확인합니다
   showHeat = false; showPlaces = false; titleEdit = false; viewStep = null;
   sb = baseClient({ "x-room-code": code });
   await sb.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
@@ -359,7 +361,7 @@ async function attachRoom(code, id) {
 /* 방 목록. code 는 RLS 게이트용으로만 남아 있고 화면에는 나오지 않습니다. */
 async function fetchRooms() {
   if (mode !== "shared") return;
-  var r = await authClient.from("rooms").select("id,code,title,year,created_at")
+  var r = await authClient.from("rooms").select("id,code,title,year,created_at,delete_code")
     .order("created_at", { ascending: false });
   roomList = r.data || [];
   schedule();
@@ -369,20 +371,48 @@ async function createRoom(title, year) {
   title = String(title || "").trim().slice(0, 24);
   year = Number(year) || newRoomYear;
   if (!title) title = String(year).slice(2) + "년도 여행";
+  if (!/^[0-9]{4}$/.test(newRoomCode4)) { say("삭제 코드를 숫자 4자리로 정해 주세요."); return; }
   var code = makeCode();
   var client = baseClient({ "x-room-code": code });
   await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
-  var r = await client.from("rooms").insert({ code: code, title: title, year: year }).select("id").single();
+  var r = await client.from("rooms")
+    .insert({ code: code, title: title, year: year, delete_code: newRoomCode4 })
+    .select("id").single();
   if (r.error) { say(writeError(r.error)); return; }
   await attachRoom(code, r.data.id);
 }
 
-async function deleteRoom() {
-  if (!delTarget) return;
-  var client = baseClient({ "x-room-code": delTarget.code });
+/* 삭제 코드가 맞는지. 코드가 없는 옛 방은 이름 옆에서 먼저 정하게 안내합니다. */
+function codeOk(expected) {
+  if (!expected) return "none";
+  return String(codeDraft).trim() === String(expected) ? "ok" : "bad";
+}
+
+async function runGuarded() {
+  if (!guardAction) return;
+  var a = guardAction;
+  var expected;
+  if (a.kind === "delroom") {
+    var row = roomList.filter(function (r) { return r.code === a.code; })[0];
+    expected = row ? row.delete_code : "";
+  } else {
+    expected = M().delete_code || "";
+  }
+  var st = codeOk(expected);
+  if (st === "none") { say("이 여행은 삭제 코드가 없어요. 여행 이름 옆 '이름·코드'에서 먼저 정해 주세요."); return; }
+  if (st === "bad") { say("삭제 코드가 맞지 않아요."); return; }
+  guardAction = null; codeDraft = ""; modalView = null;
+  if (a.kind === "delroom") await deleteRoom(a.code);
+  else if (a.kind === "clearvotes") { await clearRound(M().round); say("이번 라운드 표를 모두 지웠어요."); }
+  render();
+}
+
+async function deleteRoom(code) {
+  if (!code) return;
+  var client = baseClient({ "x-room-code": code });
   await client.auth.setSession({ access_token: session.access_token, refresh_token: session.refresh_token });
-  var r = await client.from("rooms").delete().eq("code", delTarget.code);
-  modalView = null; delTarget = null;
+  var r = await client.from("rooms").delete().eq("code", code);
+  delTarget = null;
   if (r.error) { say(writeError(r.error)); return; }
   await fetchRooms();
   render();
@@ -543,7 +573,6 @@ function identifyAs(name) {
     startDatePick();
   }
   identified = true;
-  LS.set(roomKey(), me.id);
   var r = reachedStep();
   viewStep = (r !== liveStep()) ? r : null;
   render();
@@ -609,12 +638,9 @@ async function addCustomPlace() {
   render();
 }
 
-async function startVote(mode2) {
+async function startVote() {
   if (S.places.length < 2) { say("여행지를 2곳 이상 올려 주세요."); return; }
-  var already = S.ballots.filter(function (b) { return b.round === 1; }).length;
-  if (already && !mode2) { modalView = "restart"; render(); return; }
-  if (mode2 === "fresh") await clearRound(1);
-  modalView = null;
+  // 이미 낸 표는 그대로 둡니다. 고치고 싶은 사람은 각자 '내 표 고치기' 를 씁니다.
   resetDraft(1);
   await store.setMeta({
     phase: "vote", round: 1,
@@ -696,6 +722,13 @@ async function clearRound(round) {
 /* 낸 표를 회수해 고치기. 내 표 하나만 지우고 이전 선택을 초안으로 되살립니다.
    다른 사람 표는 건드리지 않습니다. */
 async function editMyBallot() {
+  var typed = String(editName || "").trim().replace(/\s/g, "");
+  if (!typed) { say("본인 이름을 적어 주세요."); return; }
+  if (typed !== String(me.name || "").replace(/\s/g, "")) {
+    say("지금 들어와 있는 이름(" + me.name + ")과 달라요.");
+    return;
+  }
+  editName = "";
   var round = M().round;
   var b = myBallot(round);
   if (!b) { say("낸 표를 찾지 못했어요. 새로고침한 뒤 다시 시도해 주세요."); return; }
@@ -1182,23 +1215,35 @@ function shareCard() {
   if (mode !== "shared" || !roomId) return "";
   var m = M();
   if (titleEdit) {
-    return '<div class="stack-sm"><div class="eyebrow">여행 이름 바꾸기</div>' +
+    return '<div class="stack-sm"><div class="eyebrow">여행 이름</div>' +
       '<input class="field" data-keep="titleinput" data-titleinput="1" maxlength="24" ' +
         'placeholder="예: 27년도 여행" autocomplete="off" value="' + esc(titleDraft) + '">' +
+      '<div class="eyebrow">삭제 코드 (숫자 4자리)</div>' +
+      '<input class="field" data-keep="newcode" data-newcode="1" inputmode="numeric" maxlength="4" ' +
+        'placeholder="' + (m.delete_code ? "지금 설정됨 · 바꾸려면 입력" : "아직 없음 · 정해 주세요") + '" ' +
+        'autocomplete="off" value="' + esc(newRoomCode4) + '">' +
+      '<p class="muted">여행을 지우거나 표를 초기화할 때 물어봅니다.</p>' +
       '<div class="btn-row"><button class="btn sm red" data-act="savetitle">저장</button>' +
       '<button class="btn sm ghost" data-act="canceltitle">취소</button></div></div>';
   }
   return '<div class="stack-sm"><div class="eyebrow">' + (m.year || window.TV.cal.YEAR) + " 여행</div>" +
     '<div class="codebox">' + esc(m.title || "여행") + "</div>" +
     '<div class="btn-row"><button class="btn block" data-act="copylink">링크 복사해서 단톡방에 뿌리기</button></div>' +
-    '<button class="btn sm ghost" data-act="edittitle">이름 바꾸기</button></div>';
+    '<button class="btn sm ghost" data-act="edittitle">이름·삭제코드 바꾸기</button>' +
+    (m.delete_code ? "" : '<p class="muted">삭제 코드가 없어요. 실수로 날리는 걸 막으려면 정해 두세요.</p>') +
+    "</div>";
 }
 
 async function saveTitle() {
   var t = String(titleDraft || "").trim().slice(0, 24);
   if (!t) { say("이름을 적어 주세요."); return; }
-  titleEdit = false;
-  await store.setMeta({ title: t });
+  var patch = { title: t };
+  if (newRoomCode4) {
+    if (!/^[0-9]{4}$/.test(newRoomCode4)) { say("삭제 코드는 숫자 4자리예요."); return; }
+    patch.delete_code = newRoomCode4;
+  }
+  titleEdit = false; newRoomCode4 = "";
+  await store.setMeta(patch);
   render();
 }
 
@@ -1229,10 +1274,14 @@ function viewRoomEntry() {
       : '<p class="muted" style="text-align:center;padding:6px 0">아직 만들어진 여행이 없어요.</p>') +
     '<div class="panel stack-sm"><div class="eyebrow">새로 만들기</div>' +
     '<div class="btn-row">' + years + "</div>" +
-    '<input class="field" data-keep="roomtitle" maxlength="24" placeholder="' +
-      String(newRoomYear).slice(2) + '년도 여행" autocomplete="off">' +
+    '<input class="field" data-keep="roomtitle" data-newtitle="1" maxlength="24" placeholder="' +
+      String(newRoomYear).slice(2) + '년도 여행" autocomplete="off" value="' + esc(newRoomTitle) + '">' +
     '<p class="muted">고른 연도의 캘린더가 들어갑니다. 이름을 비우면 “' +
       String(newRoomYear).slice(2) + '년도 여행”으로 만들어져요.</p>' +
+    '<div class="eyebrow" style="margin-top:4px">삭제 코드 (숫자 4자리)</div>' +
+    '<input class="field" data-keep="newcode" data-newcode="1" inputmode="numeric" maxlength="4" ' +
+      'placeholder="예: 1234" autocomplete="off" value="' + esc(newRoomCode4) + '">' +
+    '<p class="muted">여행을 지우거나 표를 초기화할 때 물어봅니다. 실수로 날리는 걸 막는 용도예요. 친구들에게 알려 주세요.</p>' +
     '<button class="btn red block" data-act="createroom">이 여행 만들기</button></div>';
 }
 
@@ -1719,8 +1768,8 @@ function renderDock() {
     else if (m.spin) inner = '<button class="btn block" disabled>돌아가는 중…</button>';
     else inner = '<button class="btn red block" data-act="spin">돌리기</button>';
   } else if (m.phase === "done") {
-    inner = '<button class="btn block" data-act="askreset">새 투표 시작하기</button>';
-    hint = "지금까지 기록은 모두 지워져요.";
+    inner = '<button class="btn block" data-act="home">여행 목록으로</button>';
+    hint = "새로 정하려면 여행을 새로 만드세요. 이 기록은 그대로 남습니다.";
   }
   if (!inner) return "";
   return '<div class="dock"><div class="dock-in">' + inner + (hint ? '<div class="hint">' + esc(hint) + "</div>" : "") + "</div></div>";
@@ -1731,9 +1780,9 @@ function renderFoot() {
   var m = M(), bits = [];
   if (myVoter()) bits.push('<button data-act="editdates">내 날짜 수정</button>');
   bits.push('<button data-act="switchperson">다른 사람으로</button>');
-  if (m.phase !== "done") bits.push('<button data-act="askreset">처음부터 다시</button>');
   if (mode === "local" && m.phase === "vote") bits.push('<button data-act="next">다음 사람에게 넘기기</button>');
   if (mode === "shared" && m.phase !== "lobby") bits.push('<button data-act="copylink">링크 복사</button>');
+  bits.push('<button data-act="askclear">모든 참가자 표 초기화</button>');
   return bits.join(" · ");
 }
 
@@ -1757,10 +1806,23 @@ function renderModal() {
   if (modalView === "editballot") {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
       '<div class="stack"><div><div class="eyebrow">내 표 고치기</div>' +
-      '<h1 class="title" style="font-size:24px">낸 표를 되돌릴까요?</h1></div>' +
+      '<h1 class="title" style="font-size:24px">본인 이름을 적어 주세요</h1></div>' +
       '<p class="lede">고른 곳과 코멘트가 그대로 불러와집니다. 고친 뒤 다시 제출해야 반영돼요. ' +
       '<b>다른 사람 표는 건드리지 않습니다.</b></p>' +
-      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doedit">되돌리기</button>' +
+      '<input class="field" data-keep="editname" data-editname="1" maxlength="12" ' +
+        'placeholder="' + esc(me.name) + '" autocomplete="off" value="' + esc(editName) + '">' +
+      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doedit">확인하고 고치기</button>' +
+      '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
+  }
+  if (modalView === "guard") {
+    var g = guardAction || {};
+    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
+      '<div class="stack"><div><div class="eyebrow">삭제 코드</div>' +
+      '<h1 class="title" style="font-size:24px">' + esc(g.title || "") + "</h1></div>" +
+      '<p class="lede">' + esc(g.desc || "") + " 되돌릴 수 없습니다.</p>" +
+      '<input class="field" data-keep="guardcode" data-guardcode="1" inputmode="numeric" maxlength="4" ' +
+        'placeholder="숫자 4자리" autocomplete="off" value="' + esc(codeDraft) + '">' +
+      '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--accent)" data-act="doguard">확인</button>' +
       '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
   }
   if (modalView === "openresult") {
@@ -1772,18 +1834,6 @@ function renderModal() {
       '표가 들어오면 결과도 같이 바뀝니다. 지금 나온 순위만 미리 보는 셈이에요.</p>' +
       '<div class="btn-row"><button class="btn red" style="flex:1" data-act="doopenresult">그래도 열기</button>' +
       '<button class="btn ghost" data-act="closemodal">기다리기</button></div></div></div></div>';
-  }
-  if (modalView === "restart") {
-    var n1 = S.ballots.filter(function (b) { return b.round === 1; }).length;
-    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
-      '<div class="stack"><div><div class="eyebrow">1차 투표</div>' +
-      '<h1 class="title" style="font-size:24px">이미 낸 표가 ' + n1 + '장 있어요</h1></div>' +
-      '<p class="lede"><b>표 수정하기</b> — 낸 표는 그대로 두고 아직 안 한 사람만 투표합니다. ' +
-      '이미 낸 사람은 각자 "내 표 고치기" 로 자기 표만 바꿀 수 있어요.<br><br>' +
-      '<b>모두 다시</b> — 참가자 전원의 이번 라운드 표와 코멘트를 지우고 처음부터 다시 합니다.</p>' +
-      '<div class="btn-row"><button class="btn red" style="flex:1" data-act="startvotekeep">표 수정하기</button>' +
-      '<button class="btn" data-act="startvotefresh">모두 다시</button></div>' +
-      '<button class="btn ghost block" data-act="closemodal">그만두기</button></div></div></div>';
   }
   if (modalView === "home") {
     return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
@@ -1799,14 +1849,6 @@ function renderModal() {
       '<h1 class="title" style="font-size:24px">“' + esc(delTarget.title || "이 여행") + '” 을 지울까요?</h1></div>' +
       '<p class="lede">여행지, 표, 코멘트, 참가자 날짜가 전부 사라집니다. 되돌릴 수 없어요.</p>' +
       '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--ink)" data-act="dodelroom">지우기</button>' +
-      '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
-  }
-  if (modalView === "reset") {
-    return '<div class="scrim" data-act="closemodal"><div class="sheet"><div class="grab"></div>' +
-      '<div class="stack"><div><div class="eyebrow">초기화</div>' +
-      '<h1 class="title" style="font-size:24px">전부 지우고 다시 시작할까요?</h1></div>' +
-      '<p class="lede">여행지 목록, 표, 코멘트, 참가자 날짜가 모두 사라져요. 되돌릴 수 없습니다.</p>' +
-      '<div class="btn-row"><button class="btn" style="flex:1;border-color:var(--accent);color:var(--accent)" data-act="doreset">지우고 새로 시작</button>' +
       '<button class="btn ghost" data-act="closemodal">그만두기</button></div></div></div></div>';
   }
   if (modalView === "handoff") {
@@ -1828,6 +1870,10 @@ document.addEventListener("input", function (e) {
   if (!t || !t.dataset) return;
   if (t.dataset.keep === "vacdays") { vacDays = t.value; return; }
   if (t.dataset.titleinput) { titleDraft = t.value; return; }
+  if (t.dataset.guardcode) { codeDraft = t.value.replace(/[^0-9]/g, "").slice(0, 4); if (t.value !== codeDraft) t.value = codeDraft; return; }
+  if (t.dataset.editname) { editName = t.value; return; }
+  if (t.dataset.newtitle) { newRoomTitle = t.value; return; }
+  if (t.dataset.newcode) { newRoomCode4 = t.value.replace(/[^0-9]/g, "").slice(0, 4); if (t.value !== newRoomCode4) t.value = newRoomCode4; return; }
   if (t.dataset.taginput) {
     // 스페이스나 쉼표로도 태그가 끊기게
     if (/[s,]/.test(t.value)) { tagText = t.value; if (addTagFromInput()) render(); return; }
@@ -1865,6 +1911,10 @@ document.addEventListener("keydown", function (e) {
   if (t.dataset.keep === "joinname" || t.dataset.keep === "roomtitle") { e.preventDefault(); t.blur(); }
   if (t.dataset.keep === "idname") { e.preventDefault(); identifyAs(t.value); }
   if (t.dataset.titleinput) { titleDraft = t.value; return; }
+  if (t.dataset.guardcode) { codeDraft = t.value.replace(/[^0-9]/g, "").slice(0, 4); if (t.value !== codeDraft) t.value = codeDraft; return; }
+  if (t.dataset.editname) { editName = t.value; return; }
+  if (t.dataset.newtitle) { newRoomTitle = t.value; return; }
+  if (t.dataset.newcode) { newRoomCode4 = t.value.replace(/[^0-9]/g, "").slice(0, 4); if (t.value !== newRoomCode4) t.value = newRoomCode4; return; }
   if (t.dataset.taginput) { e.preventDefault(); if (addTagFromInput()) render(); }
   if (t.dataset.titleinput) { e.preventDefault(); saveTitle(); }
 });
@@ -1877,20 +1927,21 @@ document.addEventListener("click", function (e) {
 
   if (act === "home") goHome();
   else if (act === "back") goBack();
-  else if (act === "startvotekeep") startVote("keep");
-  else if (act === "startvotefresh") startVote("fresh");
   else if (act === "doopenresult") openResult();
   else if (act === "askedit") { modalView = "editballot"; render(); }
   else if (act === "doedit") editMyBallot();
   else if (act === "leavehome") { draft = null; modalView = null; goHome(); }
   else if (act === "createroom") {
-    var tf = document.querySelector('[data-keep="roomtitle"]');
-    createRoom(tf ? tf.value : "", newRoomYear);
+    createRoom(newRoomTitle, newRoomYear);
   }
   else if (act === "setyear") { newRoomYear = Number(el.dataset.y); render(); }
   else if (act === "enterroom") joinRoomByCode(el.dataset.code);
-  else if (act === "askdelroom") { delTarget = { code: el.dataset.code, title: el.dataset.t }; modalView = "delroom"; render(); }
-  else if (act === "dodelroom") deleteRoom();
+  else if (act === "askdelroom") {
+    guardAction = { kind: "delroom", code: el.dataset.code,
+      title: "“" + (el.dataset.t || "이 여행") + "” 을 지울까요?",
+      desc: "여행지, 표, 코멘트, 참가자 날짜가 전부 사라집니다." };
+    codeDraft = ""; modalView = "guard"; render();
+  }
   else if (act === "copylink") copyLink();
   else if (act === "join") { var j = document.querySelector('[data-keep="joinname"]'); joinAsName(j ? j.value : ""); }
   else if (act === "editdates") { editingDates = true; startDatePick(); render(); }
@@ -1907,9 +1958,9 @@ document.addEventListener("click", function (e) {
   else if (act === "toggleplaces") { showPlaces = !showPlaces; render(); }
   else if (act === "gostep") goStep(el.dataset.n);
   else if (act === "golive") { viewStep = null; editingDates = false; dateSel = null; render(); }
-  else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; render(); }
+  else if (act === "edittitle") { titleEdit = true; titleDraft = M().title || ""; newRoomCode4 = ""; render(); }
   else if (act === "savetitle") saveTitle();
-  else if (act === "canceltitle") { titleEdit = false; titleDraft = ""; render(); }
+  else if (act === "canceltitle") { titleEdit = false; titleDraft = ""; newRoomCode4 = ""; render(); }
   else if (act === "opentags") openTags(id);
   else if (act === "savetags") saveTags();
   else if (act === "canceltags") { tagEditId = null; tagDraft = []; tagText = ""; render(); }
@@ -1923,7 +1974,7 @@ document.addEventListener("click", function (e) {
   else if (act === "unlock") { ensureDraft(); draft.status[id] = "idle"; draft.err[id] = ""; render(); }
   else if (act === "review") { if (canSubmit()) { modalView = "confirm"; render(); } }
   else if (act === "submit") submitBallot();
-  else if (act === "closemodal") { modalView = null; render(); }
+  else if (act === "closemodal") { modalView = null; guardAction = null; codeDraft = ""; editName = ""; render(); }
   else if (act === "openresult") openResult();
   else if (act === "backvote") store.setMeta({ phase: "vote" });
   else if (act === "confirmwin") confirmWin(id);
@@ -1931,8 +1982,12 @@ document.addEventListener("click", function (e) {
   else if (act === "revote") pickRevote();
   else if (act === "wheel") pickWheel();
   else if (act === "spin") doSpin();
-  else if (act === "askreset") { modalView = "reset"; render(); }
-  else if (act === "doreset") { modalView = null; draft = null; spinSeen = {}; store.resetAll(); }
+  else if (act === "askclear") {
+    guardAction = { kind: "clearvotes", title: "모든 참가자 표를 지울까요?",
+      desc: "이번 라운드에 낸 표와 코멘트가 전부 사라지고 모두 처음부터 다시 투표합니다. 여행지·참가자·날짜는 그대로 남습니다." };
+    codeDraft = ""; modalView = "guard"; render();
+  }
+  else if (act === "doguard") runGuarded();
   else if (act === "next") nextPerson();
 });
 
